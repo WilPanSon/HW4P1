@@ -64,9 +64,9 @@ class ASRDataset(Dataset):
         self.isTrainPartition = isTrainPartition
         self.tokenizer = tokenizer
 
-        self.eos_token = tokenizer.eos_token_id
-        self.sos_token = tokenizer.sos_token_id
-        self.pad_token = tokenizer.pad_token_id
+        self.eos_token = tokenizer.eos_id
+        self.sos_token = tokenizer.sos_id
+        self.pad_token = tokenizer.pad_id
 
         self.fbank_dir = os.path.join(config['root'], partition, 'fbank')
         
