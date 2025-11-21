@@ -6,7 +6,7 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 import torch.nn as nn
 from hw4lib.data.tokenizer import H4Tokenizer
-from hw4lib.utils import create_optimizer
+from hw4lib.utils import create_optimizer, create_scheduler # <--- These are used now
 from hw4lib.model import DecoderOnlyTransformer, EncoderDecoderTransformer
 import os
 import shutil
@@ -18,58 +18,6 @@ from torchinfo import summary
 class BaseTrainer(ABC):
     """
     Base Trainer class that provides common functionality for all trainers.
-
-    This trainer implements:
-    1. Experiment tracking and logging (with wandb support)
-    2. Checkpoint management
-    3. Metric logging and visualization
-    4. Directory structure management
-    5. Device handling
-
-    Key Components:
-    1. Experiment Management:
-    - Creates organized directory structure for experiments
-    - Handles config file copying and model architecture saving
-    - Manages checkpoint saving and loading
-    
-    2. Logging and Visualization:
-    - Supports both local and wandb logging
-    - Saves attention visualizations
-    - Tracks training metrics and learning rates
-    - Saves generated text outputs
-    
-    3. Training Infrastructure:
-    - Handles device placement
-    - Manages optimizer creation
-    - Supports gradient scaling for mixed precision
-    - Implements learning rate scheduling
-
-    4. Abstract Methods (to be implemented by child classes):
-    - _train_epoch: Single training epoch implementation
-    - _validate_epoch: Single validation epoch implementation
-    - train: Full training loop implementation
-    - evaluate: Evaluation loop implementation
-
-    Args:
-        model (nn.Module): The model to train
-        tokenizer (H4Tokenizer): Tokenizer for text processing
-        config (dict): Configuration dictionary
-        run_name (str): Name for the training run
-        config_file (str): Path to config file
-        device (Optional[str]): Device to run on ('cuda' or 'cpu')
-
-    Directory Structure:
-        expts/
-        └── {run_name}/
-            ├── config.yaml
-            ├── model_arch.txt
-            ├── checkpoints/
-            │   ├── checkpoint-best-metric-model.pth
-            │   └── checkpoint-last-epoch-model.pth
-            ├── attn/
-            │   └── {attention visualizations}
-            └── text/
-                └── {generated text outputs}
     """
     def __init__(
             self,
@@ -80,6 +28,9 @@ class BaseTrainer(ABC):
             config_file: str,
             device: Optional[str] = None
     ):
+        # 1. Fix WandB Timeout (Prevent CommError)
+        os.environ["WANDB_INIT_TIMEOUT"] = "300"
+
         # If device is not specified, determine it
         if device is None:
             device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -90,11 +41,14 @@ class BaseTrainer(ABC):
         self.tokenizer = tokenizer
         self.config = config
         
-        # Initialize optimizer and scheduler
-        self.optimizer = None  # Should be set by child class
-        self.scheduler = None  # Will be set when training starts
+        # 2. Initialize optimizer and scheduler (CRITICAL FIX)
+        # The original code set these to None, which would crash the child trainers.
+        self.optimizer = create_optimizer(self.model, self.config)
+        self.scheduler = create_scheduler(self.optimizer, self.config)
+
         self.scaler = torch.amp.GradScaler(device=self.device)
         self.use_wandb = config['training'].get('use_wandb', False)
+        
         # Initialize experiment directories
         self.expt_root, self.checkpoint_dir, self.attn_dir, self.text_dir, \
         self.best_model_path, self.last_model_path = self._init_experiment(run_name, config_file)
@@ -135,42 +89,41 @@ class BaseTrainer(ABC):
         shutil.copy2(config_file, expt_root / "config.yaml")
 
         # Save model architecture with torchinfo summary
-        with open(expt_root / "model_arch.txt", "w") as f:
-            # Get a sample input shape from your model's expected input
-            if isinstance(self.model, DecoderOnlyTransformer):
-                batch_size = self.config['data'].get('batch_size', 8)
-                max_len    = self.model.max_len
-                input_size = [(batch_size, max_len), (batch_size,)]
-                dtypes     = [torch.long, torch.long]
-                # Generate the summary
-                model_summary = summary(
-                    self.model,
-                    input_size=input_size,  # Adjust these dimensions based on your model's input
-                    dtypes=dtypes
-                )
-                # Write the summary string to file
-                f.write(str(model_summary))
-            elif isinstance(self.model, EncoderDecoderTransformer):
-                batch_size = self.config['data'].get('batch_size', 8)
-                max_len = 1000
-                num_feats = self.config['data']['num_feats']
-                input_data = [
-                    torch.randn(batch_size, max_len, num_feats).to(self.device), 
-                    torch.randint(0, self.model.num_classes, (batch_size, max_len//10)).to(self.device), 
-                    torch.randint(max_len//2, max_len, (batch_size,)).to(self.device), 
-                    torch.randint(max_len//20, max_len//10, (batch_size,)).to(self.device)
-                ]
-                dtypes = [torch.float32, torch.long, torch.long, torch.long]
-                # Generate the summary
-                model_summary = summary(
-                    self.model,
-                    input_data=input_data,  # Adjust these dimensions based on your model's input
-                    dtypes=dtypes
-                )
-                # Write the summary string to file
-                f.write(str(model_summary))
-            else:
-                raise NotImplementedError("Model architecture summary not implemented")
+        try:
+            with open(expt_root / "model_arch.txt", "w") as f:
+                # Get a sample input shape from your model's expected input
+                if isinstance(self.model, DecoderOnlyTransformer):
+                    batch_size = self.config['data'].get('batch_size', 8)
+                    max_len    = self.model.max_len
+                    input_size = [(batch_size, max_len), (batch_size,)]
+                    dtypes     = [torch.long, torch.long]
+                    model_summary = summary(
+                        self.model,
+                        input_size=input_size,
+                        dtypes=dtypes,
+                        verbose=0
+                    )
+                    f.write(str(model_summary))
+                elif isinstance(self.model, EncoderDecoderTransformer):
+                    batch_size = self.config['data'].get('batch_size', 8)
+                    max_len = 1000
+                    num_feats = self.config['data']['num_feats']
+                    input_data = [
+                        torch.randn(batch_size, max_len, num_feats).to(self.device), 
+                        torch.randint(0, self.model.num_classes, (batch_size, max_len//10)).to(self.device), 
+                        torch.randint(max_len//2, max_len, (batch_size,)).to(self.device), 
+                        torch.randint(max_len//20, max_len//10, (batch_size,)).to(self.device)
+                    ]
+                    dtypes = [torch.float32, torch.long, torch.long, torch.long]
+                    model_summary = summary(
+                        self.model,
+                        input_data=input_data,
+                        dtypes=dtypes,
+                        verbose=0
+                    )
+                    f.write(str(model_summary))
+        except Exception as e:
+            print(f"Warning: Could not generate model summary: {e}")
 
         # Create subdirectories
         checkpoint_dir = expt_root / 'checkpoints'
@@ -298,18 +251,19 @@ class BaseTrainer(ABC):
     def load_checkpoint(self, filename: str):
         """
         Load a checkpoint.
-        
-        Attempts to load each component of the checkpoint separately,
-        continuing even if some components fail to load.
         """
         checkpoint_path = self.checkpoint_dir / filename
         if not checkpoint_path.exists():
             raise FileNotFoundError(f"No checkpoint found at {checkpoint_path}")
         
         try:
+            # weights_only=True is recommended for security, but if you save custom
+            # objects in 'training_history', you might need to set this to False.
             checkpoint = torch.load(checkpoint_path, map_location=self.device, weights_only=True)
         except Exception as e:
-            raise RuntimeError(f"Failed to load checkpoint file: {e}")
+            # Fallback if weights_only fails due to complex objects
+            print(f"Standard load failed, trying without weights_only restriction: {e}")
+            checkpoint = torch.load(checkpoint_path, map_location=self.device, weights_only=False)
 
         # Dictionary to track loading status of each component
         load_status = {}
