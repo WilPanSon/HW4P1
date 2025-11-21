@@ -293,7 +293,7 @@ class EncoderDecoderTransformer(nn.Module):
             x_dec, self_attn, cross_attn = self.dec_layers[i](
                 x=x_dec, 
                 enc_output=encoder_output, 
-                key_padding_mask=pad_mask_tgt, 
+                dec_key_padding_mask=pad_mask_tgt, 
                 key_padding_mask_cross=pad_mask_src,
                 attn_mask=causal_mask 
             )
