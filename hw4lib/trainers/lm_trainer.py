@@ -131,7 +131,10 @@ class LMTrainer(BaseTrainer):
             'perplexity_token': avg_perplexity_token.item(),
             'perplexity_char': avg_perplexity_char.item()
         }, last_attn_weights
-        
+
+    def evaluate(self, dataloader):
+        metrics, _ = self._validate_epoch(dataloader)
+        return metrics
 
     def train(self, train_dataloader, val_dataloader, epochs: int):
         if self.scheduler is None:
