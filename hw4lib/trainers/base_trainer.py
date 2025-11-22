@@ -84,7 +84,6 @@ class BaseTrainer(ABC):
         # We wrap this entire block in try/except so training never crashes just because of a summary error
         try:
             with open(expt_root / "model_arch.txt", "w") as f:
-                # Check class name by string to avoid import mismatch issues in Notebooks
                 model_type = type(self.model).__name__
                 
                 if "DecoderOnly" in model_type:
@@ -93,20 +92,19 @@ class BaseTrainer(ABC):
                     input_size = [(batch_size, max_len), (batch_size,)]
                     dtypes     = [torch.long, torch.long]
                     
-                    model_summary = summary(
-                        self.model,
-                        input_size=input_size,
-                        dtypes=dtypes,
-                        verbose=0
-                    )
-                    f.write(str(model_summary))
+                    # model_summary = summary(
+                    #     self.model,
+                    #     input_size=input_size,
+                    #     dtypes=dtypes,
+                    #     verbose=0
+                    # )
+                    # f.write(str(model_summary))
 
                 elif "EncoderDecoder" in model_type:
                     batch_size = self.config['data'].get('batch_size', 8)
                     max_len = 100
                     num_feats = self.config['data']['num_feats']
                     
-                    # Create dummy inputs on device
                     dummy_feats = torch.randn(batch_size, max_len, num_feats).to(self.device)
                     dummy_targets = torch.randint(0, getattr(self.model, 'num_classes', 100), (batch_size, max_len)).to(self.device)
                     dummy_src_lens = torch.full((batch_size,), max_len, dtype=torch.long).to(self.device)
@@ -115,15 +113,13 @@ class BaseTrainer(ABC):
                     # torchinfo input list
                     input_data = [dummy_feats, dummy_targets, dummy_src_lens, dummy_tgt_lens]
                     
-                    model_summary = summary(
-                        self.model,
-                        input_data=input_data,
-                        verbose=0
-                    )
-                    f.write(str(model_summary))
+                    # model_summary = summary(
+                    #     self.model,
+                    #     input_data=input_data,
+                    #     verbose=0
+                    # )
+                    # f.write(str(model_summary))
                 else:
-                    # Fallback: Just write the string representation of the model
-                    # This replaces the NotImplementedError that was crashing your code
                     f.write(str(self.model))
                     print(f"Warning: Auto-summary not supported for {model_type}. Wrote string repr instead.")
 
