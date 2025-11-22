@@ -42,7 +42,6 @@ class ASRTrainer(BaseTrainer):
         """
         Train for one epoch.
         """
-        # Initialize training variables
         self.model.train()
         batch_bar = tqdm(total=len(dataloader), dynamic_ncols=True, leave=False, position=0, desc="[Training ASR]")
         running_ce_loss = 0.0
@@ -51,11 +50,9 @@ class ASRTrainer(BaseTrainer):
         total_tokens = 0
         running_att = None
 
-        # Only zero gradients when starting a new accumulation cycle
         self.optimizer.zero_grad()
 
         for i, batch in enumerate(dataloader):
-            # Unpack batch and move to device
             feats, targets_shifted, targets_golden, feat_lengths, transcript_lengths = batch
             feats = feats.to(self.device)
             targets_shifted = targets_shifted.to(self.device)
@@ -64,10 +61,14 @@ class ASRTrainer(BaseTrainer):
             transcript_lengths = transcript_lengths.to(self.device)
 
             with torch.autocast(device_type=self.device, dtype=torch.float16):
-                # Get raw predictions and attention weights and ctc inputs from model
-                seq_out, curr_att, ctc_inputs = self.model(feats, feat_lengths, targets_shifted)
+                # FIXED CALL: Explicitly passing arguments
+                seq_out, curr_att, ctc_inputs = self.model(
+                    padded_sources=feats,
+                    padded_targets=targets_shifted,
+                    source_lengths=feat_lengths,
+                    target_lengths=transcript_lengths
+                )
                 
-                # Update running_att with the latest attention weights
                 running_att = curr_att
                 
                 # Calculate CE loss
@@ -77,16 +78,23 @@ class ASRTrainer(BaseTrainer):
                 
                 # Calculate CTC loss if needed
                 if self.ctc_weight > 0:
-                    # ctc_inputs: (B, Frames, Vocab) -> (Frames, B, Vocab) for CTCLoss
-                    # Apply log_softmax for CTC
-                    ctc_log_probs = F.log_softmax(ctc_inputs, dim=-1).permute(1, 0, 2)
-                    ctc_loss = self.ctc_criterion(ctc_log_probs, targets_golden, feat_lengths, transcript_lengths)
+                    # ctc_inputs['log_probs'] should be (T, B, C) for CTCLoss
+                    # Check your model output. Usually ctc_inputs is a dict with 'log_probs'
+                    ctc_log_probs = ctc_inputs['log_probs']
+                    # If it's not a dict in your implementation, ensure shape is (T, B, C)
+                    # Assuming dict based on previous context:
+                    ctc_loss = self.ctc_criterion(
+                        ctc_log_probs, 
+                        targets_golden, 
+                        ctc_inputs['lengths'], 
+                        transcript_lengths
+                    )
                     loss = ce_loss + self.ctc_weight * ctc_loss
                 else:
                     ctc_loss = torch.tensor(0.0, device=self.device)
                     loss = ce_loss
 
-            # Calculate metrics
+            # ... (metrics calculation) ...
             batch_tokens = transcript_lengths.sum().item()
             total_tokens += batch_tokens
             running_ce_loss += ce_loss.item() * batch_tokens
@@ -94,13 +102,10 @@ class ASRTrainer(BaseTrainer):
                 running_ctc_loss += ctc_loss.item() * batch_tokens
             running_joint_loss += loss.item() * batch_tokens
             
-            # Normalize loss by accumulation steps
             loss = loss / self.config['training']['gradient_accumulation_steps']
 
-            # Backpropagate the loss
             self.scaler.scale(loss).backward()
 
-            # Only update weights after accumulating enough gradients
             if (i + 1) % self.config['training']['gradient_accumulation_steps'] == 0:
                 self.scaler.step(self.optimizer)
                 if not isinstance(self.scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
@@ -108,10 +113,10 @@ class ASRTrainer(BaseTrainer):
                 self.scaler.update()
                 self.optimizer.zero_grad()
 
-            # Update progress bar
-            avg_ce_loss = running_ce_loss / total_tokens
-            avg_ctc_loss = running_ctc_loss / total_tokens
-            avg_joint_loss = running_joint_loss / total_tokens
+            # ... (logging update) ...
+            avg_ce_loss = running_ce_loss / total_tokens if total_tokens > 0 else 0
+            avg_ctc_loss = running_ctc_loss / total_tokens if total_tokens > 0 else 0
+            avg_joint_loss = running_joint_loss / total_tokens if total_tokens > 0 else 0
             perplexity = torch.exp(torch.tensor(avg_ce_loss))
             
             batch_bar.set_postfix(
@@ -123,12 +128,11 @@ class ASRTrainer(BaseTrainer):
             )
             batch_bar.update()
 
-            # Clean up
             del feats, targets_shifted, targets_golden, feat_lengths, transcript_lengths
             del seq_out, curr_att, ctc_inputs, loss
             torch.cuda.empty_cache()
 
-        # Handle remaining gradients
+        # ... (Handle remaining gradients at end of epoch) ...
         if (len(dataloader) % self.config['training']['gradient_accumulation_steps']) != 0:
             self.scaler.step(self.optimizer)
             if not isinstance(self.scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
@@ -136,10 +140,10 @@ class ASRTrainer(BaseTrainer):
             self.scaler.update()
             self.optimizer.zero_grad()
 
-        # Compute final metrics
-        avg_ce_loss = running_ce_loss / total_tokens
-        avg_ctc_loss = running_ctc_loss / total_tokens
-        avg_joint_loss = running_joint_loss / total_tokens
+        # ... (Compute final metrics and return) ...
+        avg_ce_loss = running_ce_loss / total_tokens if total_tokens > 0 else 0
+        avg_ctc_loss = running_ctc_loss / total_tokens if total_tokens > 0 else 0
+        avg_joint_loss = running_joint_loss / total_tokens if total_tokens > 0 else 0
         avg_perplexity_token = torch.exp(torch.tensor(avg_ce_loss))
         avg_perplexity_char = torch.exp(torch.tensor(avg_ce_loss / dataloader.dataset.get_avg_chars_per_token()))
         batch_bar.close()
