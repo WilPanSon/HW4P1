@@ -11,15 +11,22 @@ import torchmetrics.text as tmt
 from torch.utils.data import Subset
 import pandas as pd
 
+
 class ASRTrainer(BaseTrainer):
+    """
+    ASR (Automatic Speech Recognition) Trainer class that handles training,
+    validation, and recognition loops.
+    """
     def __init__(self, model, tokenizer, config, run_name, config_file, device=None):
         super().__init__(model, tokenizer, config, run_name, config_file, device)
 
+        # Initialize CE loss (ignore PAD, optional label smoothing)
         self.ce_criterion = nn.CrossEntropyLoss(
             ignore_index=self.tokenizer.pad_id,
             label_smoothing=self.config['loss'].get('label_smoothing', 0.0)
         )
 
+        # Initialize CTC loss if needed
         self.ctc_criterion = None
         self.ctc_weight = self.config['loss'].get('ctc_weight', 0.0)
         if self.ctc_weight > 0:
@@ -28,10 +35,17 @@ class ASRTrainer(BaseTrainer):
                 zero_infinity=True
             )
 
+        # Optional AMP scaler might be set by BaseTrainer; keep compatible
         if not hasattr(self, "scaler"):
             self.scaler = None
 
+    # ----------------------------- helpers -----------------------------
+
     def _get_time_reduction(self) -> int:
+        """
+        Try to infer the time_reduction factor used by SpeechEmbedding.
+        Falls back to 1 safely.
+        """
         for attr in ["time_reduction", "time_reduction_factor"]:
             if hasattr(self.model, attr):
                 tr = getattr(self.model, attr)
@@ -53,7 +67,12 @@ class ASRTrainer(BaseTrainer):
         )
         return int(tr) if isinstance(tr, (int, float)) and tr >= 1 else 1
 
+    # ------------------------------------------------------------------
+
     def _train_epoch(self, dataloader):
+        """
+        Train for one epoch.
+        """
         self.model.train()
         batch_bar = tqdm(
             total=len(dataloader),
@@ -187,6 +206,9 @@ class ASRTrainer(BaseTrainer):
         }, running_att
 
     def _validate_epoch(self, dataloader):
+        """
+        Validate for one epoch (FULL val set).
+        """
         full_greedy_cfg = {
             'num_batches': None,
             'beam_width': 1,
@@ -204,6 +226,7 @@ class ASRTrainer(BaseTrainer):
         metrics = self._calculate_asr_metrics(references, hypotheses)
         return metrics, results
 
+    # ---------------------- THIS FIXES YOUR ERROR ----------------------
     @torch.no_grad()
     def evaluate(
         self,
@@ -212,6 +235,12 @@ class ASRTrainer(BaseTrainer):
         config_name: str = "greedy",
         max_length: Optional[int] = None
     ):
+        """
+        Public evaluation hook required by BaseTrainer (removes abstractness).
+
+        Runs recognition on `dataloader` and, if targets exist, computes CER/WER
+        via _calculate_asr_metrics. Returns (metrics, results) to match _validate_epoch.
+        """
         if max_length is None:
             if hasattr(self, "text_max_len"):
                 max_length = self.text_max_len
@@ -245,8 +274,12 @@ class ASRTrainer(BaseTrainer):
             metrics = {}
 
         return metrics, results
+    # ------------------------------------------------------------------
 
     def train(self, train_dataloader, val_dataloader, epochs: int):
+        """
+        Full training loop for ASR training.
+        """
         if self.scheduler is None:
             raise ValueError("Scheduler is not initialized, initialize it first!")
         if self.optimizer is None:
@@ -305,6 +338,9 @@ class ASRTrainer(BaseTrainer):
         config_name: Optional[str] = None,
         max_length: Optional[int] = None
     ) -> List[Dict[str, Any]]:
+        """
+        Generate transcriptions from audio features.
+        """
         if max_length is None and not hasattr(self, 'text_max_len'):
             raise ValueError("text_max_len is not set. Please run training loop first or provide a max_length")
 
@@ -410,16 +446,14 @@ class ASRTrainer(BaseTrainer):
         batch_bar.close()
         return results
 
-    def _calculate_asr_metrics(self, references, hypotheses):
-        wer = tmt.WordErrorRate()
-        cer = tmt.CharErrorRate()
-        
-        return {
-            'wer': wer(hypotheses, references).item() * 100,
-            'cer': cer(hypotheses, references).item() * 100
-        }
+
+# -----------------------------------------------------------------------------------------------
 
 class ProgressiveTrainer(ASRTrainer):
+    """
+    Curriculum / stage training wrapper. Your version was fine;
+    leaving it basically unchanged, just inheriting fixed ASRTrainer.
+    """
     def __init__(self, model, tokenizer, config, run_name, config_file, device=None):
         super().__init__(model, tokenizer, config, run_name, config_file, device)
         self.current_stage = 0
