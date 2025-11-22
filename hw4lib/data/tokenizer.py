@@ -125,16 +125,20 @@ class H4Tokenizer:
         """
         return self.tokenizer.encode(text).ids
 
-    def decode(self, token_ids: List[int], skip_special_tokens: bool=False) -> str:
+def decode(self, token_ids, skip_special_tokens: bool=False) -> str:
         """
         Convert token IDs back to text.
-
+        
         Args:
-            token_ids: List of token IDs to decode
-
+            token_ids: List of token IDs or Tensor to decode
+            
         Returns:
             Decoded text string
         """
+
+        if hasattr(token_ids, 'tolist'):
+            token_ids = token_ids.tolist()
+            
         return self.tokenizer.decode(token_ids, skip_special_tokens=skip_special_tokens)
 
     def _validate_tokenizer(self) -> None:
