@@ -1,4 +1,3 @@
-%%writefile hw4lib/trainers/base_trainer.py
 import wandb
 import json
 from pathlib import Path
