@@ -125,7 +125,7 @@ class H4Tokenizer:
         """
         return self.tokenizer.encode(text).ids
 
-def decode(self, token_ids, skip_special_tokens: bool=False) -> str:
+    def decode(self, token_ids, skip_special_tokens: bool=False) -> str:
         """
         Convert token IDs back to text.
         
