@@ -87,15 +87,10 @@ class CrossAttentionLayer(nn.Module):
     def __init__(self, d_model: int, num_heads: int, dropout: float = 0.0):
         '''
         Initialize the CrossAttentionLayer. 
-        Args:
-            d_model   (int): The dimension of the model.
-            num_heads (int): The number of attention heads.
-            dropout (float): The dropout rate.
         '''
         super().__init__()
         
         # Initialize the multi-head attention mechanism
-        # batch_first=True is crucial because inputs are (batch, seq, dim)
         self.mha = nn.MultiheadAttention(
             embed_dim=d_model, 
             num_heads=num_heads, 
@@ -113,30 +108,15 @@ class CrossAttentionLayer(nn.Module):
     def forward(self, x: torch.Tensor, y: torch.Tensor, key_padding_mask: Optional[torch.Tensor] = None, attn_mask: Optional[torch.Tensor] = None) -> Tuple[torch.Tensor, torch.Tensor]:
         '''
         Forward pass for the CrossAttentionLayer.
-        Args:
-            x (torch.Tensor): The input tensor from decoder (Query). shape: (batch_size, seq_len_dec, d_model)   
-            y (torch.Tensor): The input tensor from encoder (Key/Value). shape: (batch_size, seq_len_enc, d_model)
-            key_padding_mask: Mask for encoder keys. shape: (batch_size, seq_len_enc)
-            attn_mask: Attention mask. shape: (seq_len_dec, seq_len_enc)
-
-        Returns:
-            x (torch.Tensor): The output tensor. shape: (batch_size, seq_len, d_model)
-            mha_attn_weights (torch.Tensor): The attention weights.
         '''
-        
-        
         # 1. Store residual connection
         residual = x
         
         # 2. Apply pre-normalization (Pre-LN)
-        # Norm is applied to the Decoder input (Query source) before attention
         x_norm = self.norm(x)
         
         # 3. Apply cross-attention
-        # Query comes from Decoder (x_norm)
-        # Key and Value come from Encoder (y)
-        # attn_output shape: (batch, seq_len, d_model)
-        # mha_attn_weights shape: (batch, seq_len_dec, seq_len_enc)
+        # FIX: Set average_attn_weights=True to match expected shape (Batch, Seq, Seq)
         attn_output, mha_attn_weights = self.mha(
             query=x_norm, 
             key=y, 
@@ -144,14 +124,10 @@ class CrossAttentionLayer(nn.Module):
             key_padding_mask=key_padding_mask,
             attn_mask=attn_mask,
             need_weights=True,
-            average_attn_weights=False # Set False to get heads separate, or True to average. Usually True for simple visualization/return.
-            # Note: If you need averaged weights (batch, seq, seq), default is usually acceptable. 
-            # If specific shape (batch, heads, seq, seq) is needed, set average_attn_weights=False.
-            # Based on typical HW requirements, averaging is often implied unless specified otherwise.
+            average_attn_weights=True # <--- CHANGED TO TRUE
         )
         
         # 4. Apply residual connection with dropout
-        # We apply dropout to the output of attention, then add the original residual
         x = residual + self.dropout(attn_output)
         
         # 5. Return the output tensor and attention weights
