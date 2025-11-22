@@ -1,3 +1,4 @@
+%%writefile hw4lib/trainers/base_trainer.py
 import wandb
 import json
 from pathlib import Path
@@ -18,6 +19,13 @@ from torchinfo import summary
 class BaseTrainer(ABC):
     """
     Base Trainer class that provides common functionality for all trainers.
+
+    This trainer implements:
+    1. Experiment tracking and logging (with wandb support)
+    2. Checkpoint management
+    3. Metric logging and visualization
+    4. Directory structure management
+    5. Device handling
     """
     def __init__(
             self,
@@ -28,9 +36,10 @@ class BaseTrainer(ABC):
             config_file: str,
             device: Optional[str] = None
     ):
-        # 1. Fix WandB Timeout
+        # 1. Fix WandB Timeout to prevent CommErrors
         os.environ["WANDB_INIT_TIMEOUT"] = "300"
 
+        # If device is not specified, determine it
         if device is None:
             device = "cuda" if torch.cuda.is_available() else "cpu"
         
@@ -40,8 +49,8 @@ class BaseTrainer(ABC):
         self.tokenizer = tokenizer
         self.config = config
         
-        # 2. Initialize optimizer and scheduler BEFORE experiment init
-        # This ensures they exist if logging tries to access LR
+        # 2. Initialize optimizer and scheduler
+        # (Critically important: must be done here, not set to None)
         self.optimizer = create_optimizer(self.model, self.config)
         self.scheduler = create_scheduler(self.optimizer, self.config)
 
@@ -52,38 +61,46 @@ class BaseTrainer(ABC):
         self.expt_root, self.checkpoint_dir, self.attn_dir, self.text_dir, \
         self.best_model_path, self.last_model_path = self._init_experiment(run_name, config_file)
 
+        # Training state
         self.current_epoch = 0
         self.best_metric = float('inf')
         self.training_history = []
     
     @abstractmethod
     def _train_epoch(self, dataloader) -> Tuple[Dict[str, float], Dict[str, torch.Tensor]]:
+        """Train for one epoch."""
         pass
 
     @abstractmethod
     def _validate_epoch(self, dataloader) -> Dict[str, float]:
+        """Validate for one epoch."""
         pass
 
     @abstractmethod
     def train(self, train_dataloader, val_dataloader):
+        """Full training loop."""
         pass
 
     @abstractmethod
     def evaluate(self, dataloader) -> Dict[str, float]:
+        """Evaluation loop."""
         pass
 
 
     def _init_experiment(self, run_name: str, config_file: str):
         """Initialize experiment directories and save initial files."""
+        # Create experiment directory
         expt_root = Path(os.getcwd()) / 'expts' / run_name
         expt_root.mkdir(parents=True, exist_ok=True)
 
+        # Copy config
         shutil.copy2(config_file, expt_root / "config.yaml")
 
-        # --- ROBUST MODEL SUMMARY GENERATION ---
-        # We wrap this entire block in try/except so training never crashes just because of a summary error
+        # Save model architecture with torchinfo summary
+        # We wrap this in try/except so training never crashes due to summary errors
         try:
             with open(expt_root / "model_arch.txt", "w") as f:
+                # Check class name by string to match notebook definitions
                 model_type = type(self.model).__name__
                 
                 if "DecoderOnly" in model_type:
@@ -92,41 +109,42 @@ class BaseTrainer(ABC):
                     input_size = [(batch_size, max_len), (batch_size,)]
                     dtypes     = [torch.long, torch.long]
                     
-                    # model_summary = summary(
-                    #     self.model,
-                    #     input_size=input_size,
-                    #     dtypes=dtypes,
-                    #     verbose=0
-                    # )
-                    # f.write(str(model_summary))
-
+                    model_summary = summary(
+                        self.model,
+                        input_size=input_size,
+                        dtypes=dtypes,
+                        verbose=0
+                    )
+                    f.write(str(model_summary))
                 elif "EncoderDecoder" in model_type:
                     batch_size = self.config['data'].get('batch_size', 8)
                     max_len = 100
                     num_feats = self.config['data']['num_feats']
                     
+                    # Create dummy inputs
                     dummy_feats = torch.randn(batch_size, max_len, num_feats).to(self.device)
                     dummy_targets = torch.randint(0, getattr(self.model, 'num_classes', 100), (batch_size, max_len)).to(self.device)
                     dummy_src_lens = torch.full((batch_size,), max_len, dtype=torch.long).to(self.device)
                     dummy_tgt_lens = torch.full((batch_size,), max_len, dtype=torch.long).to(self.device)
 
-                    # torchinfo input list
                     input_data = [dummy_feats, dummy_targets, dummy_src_lens, dummy_tgt_lens]
                     
-                    # model_summary = summary(
-                    #     self.model,
-                    #     input_data=input_data,
-                    #     verbose=0
-                    # )
-                    # f.write(str(model_summary))
+                    model_summary = summary(
+                        self.model,
+                        input_data=input_data,
+                        verbose=0
+                    )
+                    f.write(str(model_summary))
                 else:
+                    # Fallback for unknown model types
                     f.write(str(self.model))
-                    print(f"Warning: Auto-summary not supported for {model_type}. Wrote string repr instead.")
-
+                    print(f"Warning: Auto-summary skipped for {model_type}. Wrote string repr.")
+                    
         except Exception as e:
-            # If anything goes wrong during summary, print warning and continue
             print(f"Warning: Could not generate model summary: {e}")
+            # Do NOT raise error, just continue initialization
 
+        # Create subdirectories
         checkpoint_dir = expt_root / 'checkpoints'
         attn_dir = expt_root / 'attn'
         text_dir = expt_root / 'text'
@@ -135,9 +153,11 @@ class BaseTrainer(ABC):
         attn_dir.mkdir(exist_ok=True)
         text_dir.mkdir(exist_ok=True)
 
+        # Define checkpoint paths
         best_model_path = checkpoint_dir / 'checkpoint-best-metric-model.pth'
         last_model_path = checkpoint_dir / 'checkpoint-last-epoch-model.pth'
 
+        # Wandb initialization
         if self.use_wandb:
             run_id = self.config['training'].get('wandb_run_id', None)
             if run_id and run_id.lower() != "none":
@@ -157,12 +177,14 @@ class BaseTrainer(ABC):
         return expt_root, checkpoint_dir, attn_dir, text_dir, best_model_path, last_model_path
 
     def _log_metrics(self, metrics: Dict[str, Dict[str, float]], step: int):
+        """Generic metric logging method."""
         self.training_history.append({
             'epoch': step,
             **metrics,
             'lr': self.optimizer.param_groups[0]['lr']
         })
         
+        # Log to wandb
         if self.use_wandb:
             wandb_metrics = {}
             for split, split_metrics in metrics.items():
@@ -171,7 +193,9 @@ class BaseTrainer(ABC):
             wandb_metrics['learning_rate'] = self.optimizer.param_groups[0]['lr']
             wandb.log(wandb_metrics, step=step)
         
+        # Print metrics with tree structure
         print(f"\n📊 Metrics (Epoch {step}):")
+        
         splits = sorted(metrics.keys())
         for i, split in enumerate(splits):
             is_last_split = i == len(splits) - 1
@@ -193,6 +217,7 @@ class BaseTrainer(ABC):
 
 
     def _save_attention_plot(self, attn_weights: torch.Tensor, epoch: int, attn_type: str = "self"):
+        """Save attention weights visualization."""
         if isinstance(attn_weights, torch.Tensor):
             attn_weights = attn_weights.cpu().detach().numpy()
         
@@ -211,6 +236,7 @@ class BaseTrainer(ABC):
 
 
     def _save_generated_text(self, text: dict, suffix: str):
+        """Save generated text to JSON file."""
         text_path = os.path.join(self.text_dir, f"text_{suffix}.json")
         with open(text_path, "w") as f:
             json.dump(text, f, indent=4)
@@ -220,6 +246,7 @@ class BaseTrainer(ABC):
 
 
     def save_checkpoint(self, filename: str):
+        """Save a checkpoint of the model and training state."""
         checkpoint_path = self.checkpoint_dir / filename
         checkpoint = {
             'epoch': self.current_epoch,
@@ -237,6 +264,9 @@ class BaseTrainer(ABC):
 
 
     def load_checkpoint(self, filename: str):
+        """
+        Load a checkpoint.
+        """
         checkpoint_path = self.checkpoint_dir / filename
         if not checkpoint_path.exists():
             raise FileNotFoundError(f"No checkpoint found at {checkpoint_path}")
@@ -300,5 +330,6 @@ class BaseTrainer(ABC):
 
 
     def cleanup(self):
+        """Cleanup resources."""
         if self.use_wandb and self.wandb_run:
             wandb.finish()
