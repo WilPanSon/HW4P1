@@ -36,11 +36,6 @@ class SelfAttentionEncoderLayer(nn.Module):
     def __init__(self, d_model: int, num_heads: int, d_ff: int, dropout: float = 0.1):
         '''
         Initialize the SelfAttentionEncoderLayer. 
-        Args:
-            d_model   (int): The dimension of the model.
-            num_heads (int): The number of attention heads.
-            d_ff      (int): The dimension of the feedforward network.
-            dropout (float): The dropout rate.
         '''
         super().__init__()
 
@@ -59,15 +54,8 @@ class SelfAttentionEncoderLayer(nn.Module):
     def forward(self, x: torch.Tensor, key_padding_mask: Optional[torch.Tensor] = None) -> Tuple[torch.Tensor, torch.Tensor]:
         '''
         Forward pass for the EncoderLayer.
-        Args:
-            x (torch.Tensor): The input tensor. shape: (batch_size, seq_len, d_model)   
-            key_padding_mask (torch.Tensor): The padding mask for the input. shape: (batch_size, seq_len)
-
-        Returns:
-            x (torch.Tensor): The output tensor. shape: (batch_size, seq_len, d_model)
-            mha_attn_weights (torch.Tensor): The attention weights. shape: (batch_size, seq_len, seq_len)   
         '''
-
+        
         residual = x
 
         x_norm = self.norm1(x)
@@ -78,7 +66,7 @@ class SelfAttentionEncoderLayer(nn.Module):
             value=x_norm,
             key_padding_mask=key_padding_mask,
             need_weights=True,
-            average_attn_weights=False 
+            average_attn_weights=True
         )
         
         x = residual + self.dropout1(attn_output)
