@@ -89,14 +89,19 @@ class BaseTrainer(ABC):
         shutil.copy2(config_file, expt_root / "config.yaml")
 
         # Save model architecture with torchinfo summary
+        # We wrap this in a try-except block so training doesn't crash if summary fails
         try:
             with open(expt_root / "model_arch.txt", "w") as f:
-                # Get a sample input shape from your model's expected input
-                if isinstance(self.model, DecoderOnlyTransformer):
+                model_type = type(self.model).__name__
+                
+                # Check by string name to handle notebook/reload mismatch issues
+                if "DecoderOnly" in model_type:
                     batch_size = self.config['data'].get('batch_size', 8)
-                    max_len    = self.model.max_len
+                    max_len    = getattr(self.model, 'max_len', 512)
+                    # Sample input for DecoderOnly (IDs, Lengths)
                     input_size = [(batch_size, max_len), (batch_size,)]
                     dtypes     = [torch.long, torch.long]
+                    
                     model_summary = summary(
                         self.model,
                         input_size=input_size,
@@ -104,26 +109,34 @@ class BaseTrainer(ABC):
                         verbose=0
                     )
                     f.write(str(model_summary))
-                elif isinstance(self.model, EncoderDecoderTransformer):
+
+                elif "EncoderDecoder" in model_type:
                     batch_size = self.config['data'].get('batch_size', 8)
-                    max_len = 1000
+                    max_len = 100
                     num_feats = self.config['data']['num_feats']
-                    input_data = [
-                        torch.randn(batch_size, max_len, num_feats).to(self.device), 
-                        torch.randint(0, self.model.num_classes, (batch_size, max_len//10)).to(self.device), 
-                        torch.randint(max_len//2, max_len, (batch_size,)).to(self.device), 
-                        torch.randint(max_len//20, max_len//10, (batch_size,)).to(self.device)
-                    ]
-                    dtypes = [torch.float32, torch.long, torch.long, torch.long]
+                    
+                    # Create dummy inputs on the correct device
+                    dummy_feats = torch.randn(batch_size, max_len, num_feats).to(self.device)
+                    dummy_targets = torch.randint(0, self.model.num_classes, (batch_size, max_len)).to(self.device)
+                    dummy_src_lens = torch.full((batch_size,), max_len, dtype=torch.long).to(self.device)
+                    dummy_tgt_lens = torch.full((batch_size,), max_len, dtype=torch.long).to(self.device)
+
+                    # torchinfo needs a list of inputs matching the forward signature
+                    input_data = [dummy_feats, dummy_targets, dummy_src_lens, dummy_tgt_lens]
+                    
                     model_summary = summary(
                         self.model,
                         input_data=input_data,
-                        dtypes=dtypes,
                         verbose=0
                     )
                     f.write(str(model_summary))
+                else:
+                    f.write(f"Summary skipped. Model type '{model_type}' not recognized in _init_experiment.")
+                    print(f"Warning: Model type '{model_type}' not recognized for summary generation. Skipping.")
+
         except Exception as e:
             print(f"Warning: Could not generate model summary: {e}")
+            # We do NOT raise the error here, just let it pass so training starts
 
         # Create subdirectories
         checkpoint_dir = expt_root / 'checkpoints'
@@ -140,7 +153,6 @@ class BaseTrainer(ABC):
 
         # Wandb initialization
         if self.use_wandb:
-            """Initialize Weights & Biases logging."""
             run_id = self.config['training'].get('wandb_run_id', None)
             if run_id and run_id.lower() != "none":
                 self.wandb_run = wandb.init(
