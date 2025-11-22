@@ -1,3 +1,4 @@
+%%writefile hw4lib/trainers/base_trainer.py
 import wandb
 import json
 from pathlib import Path
@@ -40,7 +41,8 @@ class BaseTrainer(ABC):
         self.tokenizer = tokenizer
         self.config = config
         
-        # 2. Initialize optimizer and scheduler
+        # 2. Initialize optimizer and scheduler BEFORE experiment init
+        # This ensures they exist if logging tries to access LR
         self.optimizer = create_optimizer(self.model, self.config)
         self.scheduler = create_scheduler(self.optimizer, self.config)
 
@@ -80,9 +82,10 @@ class BaseTrainer(ABC):
         shutil.copy2(config_file, expt_root / "config.yaml")
 
         # --- ROBUST MODEL SUMMARY GENERATION ---
+        # We wrap this entire block in try/except so training never crashes just because of a summary error
         try:
             with open(expt_root / "model_arch.txt", "w") as f:
-                # We convert the class name to string to avoid isinstance import mismatches
+                # Check class name by string to avoid import mismatch issues in Notebooks
                 model_type = type(self.model).__name__
                 
                 if "DecoderOnly" in model_type:
@@ -106,7 +109,7 @@ class BaseTrainer(ABC):
                     
                     # Create dummy inputs on device
                     dummy_feats = torch.randn(batch_size, max_len, num_feats).to(self.device)
-                    dummy_targets = torch.randint(0, self.model.num_classes, (batch_size, max_len)).to(self.device)
+                    dummy_targets = torch.randint(0, getattr(self.model, 'num_classes', 100), (batch_size, max_len)).to(self.device)
                     dummy_src_lens = torch.full((batch_size,), max_len, dtype=torch.long).to(self.device)
                     dummy_tgt_lens = torch.full((batch_size,), max_len, dtype=torch.long).to(self.device)
 
@@ -120,13 +123,13 @@ class BaseTrainer(ABC):
                     )
                     f.write(str(model_summary))
                 else:
-                    # THIS WAS RAISING THE ERROR BEFORE. NOW WE JUST LOG A WARNING.
-                    msg = f"Summary skipped. Model type '{model_type}' not recognized."
-                    f.write(msg)
-                    print(f"Warning: {msg}")
+                    # Fallback: Just write the string representation of the model
+                    # This replaces the NotImplementedError that was crashing your code
+                    f.write(str(self.model))
+                    print(f"Warning: Auto-summary not supported for {model_type}. Wrote string repr instead.")
 
         except Exception as e:
-            # Catch any summary generation error so training doesn't crash
+            # If anything goes wrong during summary, print warning and continue
             print(f"Warning: Could not generate model summary: {e}")
 
         checkpoint_dir = expt_root / 'checkpoints'
