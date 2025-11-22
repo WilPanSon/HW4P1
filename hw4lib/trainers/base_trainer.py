@@ -1,3 +1,4 @@
+%%writefile hw4lib/trainers/base_trainer.py
 import wandb
 import json
 from pathlib import Path
@@ -18,13 +19,6 @@ from torchinfo import summary
 class BaseTrainer(ABC):
     """
     Base Trainer class that provides common functionality for all trainers.
-
-    This trainer implements:
-    1. Experiment tracking and logging (with wandb support)
-    2. Checkpoint management
-    3. Metric logging and visualization
-    4. Directory structure management
-    5. Device handling
     """
     def __init__(
             self,
@@ -35,10 +29,9 @@ class BaseTrainer(ABC):
             config_file: str,
             device: Optional[str] = None
     ):
-        # 1. Fix WandB Timeout to prevent CommErrors
+        # 1. Fix WandB Timeout
         os.environ["WANDB_INIT_TIMEOUT"] = "300"
 
-        # If device is not specified, determine it
         if device is None:
             device = "cuda" if torch.cuda.is_available() else "cpu"
         
@@ -48,8 +41,8 @@ class BaseTrainer(ABC):
         self.tokenizer = tokenizer
         self.config = config
         
-        # 2. Initialize optimizer and scheduler
-        # (Critically important: must be done here, not set to None)
+        # 2. Initialize optimizer and scheduler immediately
+        # This prevents "Optimizer is not initialized" errors in child classes
         self.optimizer = create_optimizer(self.model, self.config)
         self.scheduler = create_scheduler(self.optimizer, self.config)
 
@@ -60,7 +53,6 @@ class BaseTrainer(ABC):
         self.expt_root, self.checkpoint_dir, self.attn_dir, self.text_dir, \
         self.best_model_path, self.last_model_path = self._init_experiment(run_name, config_file)
 
-        # Training state
         self.current_epoch = 0
         self.best_metric = float('inf')
         self.training_history = []
@@ -95,11 +87,11 @@ class BaseTrainer(ABC):
         # Copy config
         shutil.copy2(config_file, expt_root / "config.yaml")
 
-        # Save model architecture with torchinfo summary
-        # We wrap this in try/except so training never crashes due to summary errors
+        # 3. Robust Model Summary Generation
+        # Wrapped in try/except so training never crashes on logging
         try:
             with open(expt_root / "model_arch.txt", "w") as f:
-                # Check class name by string to match notebook definitions
+                # Use string check to avoid import/reload mismatch in notebooks
                 model_type = type(self.model).__name__
                 
                 if "DecoderOnly" in model_type:
@@ -115,6 +107,7 @@ class BaseTrainer(ABC):
                         verbose=0
                     )
                     f.write(str(model_summary))
+
                 elif "EncoderDecoder" in model_type:
                     batch_size = self.config['data'].get('batch_size', 8)
                     max_len = 100
@@ -122,7 +115,9 @@ class BaseTrainer(ABC):
                     
                     # Create dummy inputs
                     dummy_feats = torch.randn(batch_size, max_len, num_feats).to(self.device)
-                    dummy_targets = torch.randint(0, getattr(self.model, 'num_classes', 100), (batch_size, max_len)).to(self.device)
+                    # Use num_classes if available, else default to 100
+                    n_classes = getattr(self.model, 'num_classes', 100)
+                    dummy_targets = torch.randint(0, n_classes, (batch_size, max_len)).to(self.device)
                     dummy_src_lens = torch.full((batch_size,), max_len, dtype=torch.long).to(self.device)
                     dummy_tgt_lens = torch.full((batch_size,), max_len, dtype=torch.long).to(self.device)
 
@@ -135,13 +130,13 @@ class BaseTrainer(ABC):
                     )
                     f.write(str(model_summary))
                 else:
-                    # Fallback for unknown model types
+                    # Fallback: Write string repr if model type unknown or torchinfo fails
                     f.write(str(self.model))
-                    print(f"Warning: Auto-summary skipped for {model_type}. Wrote string repr.")
-                    
+                    print(f"Warning: Auto-summary skipped for {model_type}. Wrote string representation.")
+
         except Exception as e:
             print(f"Warning: Could not generate model summary: {e}")
-            # Do NOT raise error, just continue initialization
+            # Continue execution without crashing
 
         # Create subdirectories
         checkpoint_dir = expt_root / 'checkpoints'
@@ -265,19 +260,23 @@ class BaseTrainer(ABC):
     def load_checkpoint(self, filename: str):
         """
         Load a checkpoint.
+        Attempts to load each component of the checkpoint separately.
         """
         checkpoint_path = self.checkpoint_dir / filename
         if not checkpoint_path.exists():
             raise FileNotFoundError(f"No checkpoint found at {checkpoint_path}")
         
         try:
+            # Try safe load first
             checkpoint = torch.load(checkpoint_path, map_location=self.device, weights_only=True)
         except Exception as e:
-            print(f"Standard load failed, trying without weights_only: {e}")
+            print(f"Standard load failed, trying without weights_only restriction: {e}")
+            # Fallback for complex objects
             checkpoint = torch.load(checkpoint_path, map_location=self.device, weights_only=False)
 
         load_status = {}
 
+        # Model
         try:
             self.model.load_state_dict(checkpoint['model_state_dict'])
             load_status['model'] = True
@@ -285,6 +284,7 @@ class BaseTrainer(ABC):
             print(f"Warning: Failed to load model state: {e}")
             load_status['model'] = False
 
+        # Optimizer
         try:
             self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
             load_status['optimizer'] = True
@@ -292,6 +292,7 @@ class BaseTrainer(ABC):
             print(f"Warning: Failed to load optimizer state: {e}")
             load_status['optimizer'] = False
 
+        # Scheduler
         if checkpoint.get('scheduler_state_dict') and self.scheduler:
             try:
                 self.scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
@@ -300,6 +301,7 @@ class BaseTrainer(ABC):
                 print(f"Warning: Failed to load scheduler state: {e}")
                 load_status['scheduler'] = False
 
+        # Scaler
         try:
             self.scaler.load_state_dict(checkpoint['scaler_state_dict'])
             load_status['scaler'] = True
@@ -307,6 +309,7 @@ class BaseTrainer(ABC):
             print(f"Warning: Failed to load scaler state: {e}")
             load_status['scaler'] = False
 
+        # Metrics
         try:
             self.current_epoch = checkpoint['epoch']
             self.best_metric = checkpoint['best_metric']
@@ -316,6 +319,7 @@ class BaseTrainer(ABC):
             print(f"Warning: Failed to load training state: {e}")
             load_status['training_state'] = False
 
+        # Summary
         successful_loads = [k for k, v in load_status.items() if v]
         failed_loads = [k for k, v in load_status.items() if not v]
         
