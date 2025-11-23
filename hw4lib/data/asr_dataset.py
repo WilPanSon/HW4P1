@@ -8,48 +8,6 @@ from torch.nn.utils.rnn import pad_sequence
 import torchaudio.transforms as tat
 from .tokenizer import H4Tokenizer
 
-'''
-TODO: Implement this class.
-
-Specification:
-The ASRDataset class provides data loading and processing for ASR (Automatic Speech Recognition):
-
-1. Data Organization:
-   - Handles dataset partitions (train-clean-100, dev-clean, test-clean)
-   - Features stored as .npy files in fbank directory
-   - Transcripts stored as .npy files in text directory
-   - Maintains alignment between features and transcripts
-
-2. Feature Processing:
-   - Loads log mel filterbank features from .npy files
-   - Supports multiple normalization strategies:
-     * global_mvn: Global mean and variance normalization
-     * cepstral: Per-utterance mean and variance normalization
-     * none: No normalization
-   - Applies SpecAugment data augmentation during training:
-     * Time masking: Masks random time steps
-     * Frequency masking: Masks random frequency bands
-
-3. Transcript Processing:
-   - Similar to LMDataset transcript handling
-   - Creates shifted (SOS-prefixed) and golden (EOS-suffixed) versions
-   - Tracks statistics for perplexity calculation
-   - Handles tokenization using H4Tokenizer
-
-4. Batch Preparation:
-   - Pads features and transcripts to batch-uniform lengths
-   - Provides lengths for packed sequence processing
-   - Ensures proper device placement and tensor types
-
-Key Requirements:
-- Must maintain feature-transcript alignment
-- Must handle variable-length sequences
-- Must track maximum lengths for both features and text
-- Must implement proper padding for batching
-- Must apply SpecAugment only during training
-- Must support different normalization strategies
-'''
-
 class ASRDataset(Dataset):
     def __init__(
             self,

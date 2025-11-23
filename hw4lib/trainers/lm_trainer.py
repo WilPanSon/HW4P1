@@ -133,29 +133,16 @@ class LMTrainer(BaseTrainer):
         }, last_attn_weights
 
     def evaluate(self, test_dataloader):
-        """
-        Evaluate the model on the test set.
-        
-        Args:
-            test_dataloader: DataLoader for test data
-        Returns:
-            Tuple[Dict[str, float], Dict[str, Dict[str, Dict]]]: A tuple containing:
-                - test_metrics: Test metrics
-                - generation_results: Generation results for each config
-        """
-        test_metrics, test_attn = self._validate_epoch(test_dataloader)
+        metrics, test_attn = self._validate_epoch(test_dataloader)
 
-        # Log metrics
-        metrics = {
-            'test': test_metrics
+        metrics_to_log = {
+            'test': metrics
         }
-        self._log_metrics(metrics, self.current_epoch)  
+        self._log_metrics(metrics_to_log, self.current_epoch)  
 
-        # Save attention plots
         test_attn_keys = list(test_attn.keys())
         self._save_attention_plot(test_attn[test_attn_keys[0]][0], self.current_epoch, "test_self")
 
-        # Generate with evaluation configs and collect results
         generation_results = {}
         eval_configs = self._get_evaluation_generation_configs()
         for config_name, config in eval_configs.items():
@@ -166,7 +153,7 @@ class LMTrainer(BaseTrainer):
             except Exception as e:
                 print(f"Could not generate results for {config_name}: {e}")
                 continue
-        return test_metrics, generation_results
+        return metrics, generation_results
 
     def train(self, train_dataloader, val_dataloader, epochs: int):
         if self.scheduler is None:

@@ -94,12 +94,10 @@ class ASRTrainer(BaseTrainer):
                 ce_loss = self.ce_criterion(seq_out.permute(0, 2, 1), targets_golden)
 
                 if self.ctc_weight > 0:
-                    # Check if log_probs key exists (it should be in ctc_inputs dict)
                     if isinstance(ctc_inputs, dict) and 'log_probs' in ctc_inputs:
                         log_probs = F.log_softmax(ctc_inputs['log_probs'], dim=-1)
                         ctc_lens = ctc_inputs['lengths']
                     else:
-                        # Fallback if ctc_inputs is just tensor (rare but safe)
                         log_probs = F.log_softmax(ctc_inputs, dim=-1).transpose(0, 1)
                         ctc_lens = torch.div(
                             feat_lengths, time_reduction, rounding_mode="floor"
