@@ -11,7 +11,7 @@ class LMTrainer(BaseTrainer):
         super().__init__(model, tokenizer, config, run_name, config_file, device)
         
         self.criterion = nn.CrossEntropyLoss(
-            ignore_index=self.tokenizer.pad_token_id, 
+            ignore_index=self.tokenizer.pad_id, 
             label_smoothing=self.config['training'].get('label_smoothing', 0.0)
         )
 
