@@ -6,7 +6,7 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 import torch.nn as nn
 from hw4lib.data.tokenizer import H4Tokenizer
-from hw4lib.utils import create_optimizer, create_scheduler
+from hw4lib.utils import create_optimizer
 from hw4lib.model import DecoderOnlyTransformer, EncoderDecoderTransformer
 import os
 import shutil
@@ -18,6 +18,58 @@ from torchinfo import summary
 class BaseTrainer(ABC):
     """
     Base Trainer class that provides common functionality for all trainers.
+
+    This trainer implements:
+    1. Experiment tracking and logging (with wandb support)
+    2. Checkpoint management
+    3. Metric logging and visualization
+    4. Directory structure management
+    5. Device handling
+
+    Key Components:
+    1. Experiment Management:
+    - Creates organized directory structure for experiments
+    - Handles config file copying and model architecture saving
+    - Manages checkpoint saving and loading
+    
+    2. Logging and Visualization:
+    - Supports both local and wandb logging
+    - Saves attention visualizations
+    - Tracks training metrics and learning rates
+    - Saves generated text outputs
+    
+    3. Training Infrastructure:
+    - Handles device placement
+    - Manages optimizer creation
+    - Supports gradient scaling for mixed precision
+    - Implements learning rate scheduling
+
+    4. Abstract Methods (to be implemented by child classes):
+    - _train_epoch: Single training epoch implementation
+    - _validate_epoch: Single validation epoch implementation
+    - train: Full training loop implementation
+    - evaluate: Evaluation loop implementation
+
+    Args:
+        model (nn.Module): The model to train
+        tokenizer (H4Tokenizer): Tokenizer for text processing
+        config (dict): Configuration dictionary
+        run_name (str): Name for the training run
+        config_file (str): Path to config file
+        device (Optional[str]): Device to run on ('cuda' or 'cpu')
+
+    Directory Structure:
+        expts/
+        └── {run_name}/
+            ├── config.yaml
+            ├── model_arch.txt
+            ├── checkpoints/
+            │   ├── checkpoint-best-metric-model.pth
+            │   └── checkpoint-last-epoch-model.pth
+            ├── attn/
+            │   └── {attention visualizations}
+            └── text/
+                └── {generated text outputs}
     """
     def __init__(
             self,
@@ -28,39 +80,29 @@ class BaseTrainer(ABC):
             config_file: str,
             device: Optional[str] = None
     ):
-        # --- 1. Setup & Config ---
-        os.environ["WANDB_INIT_TIMEOUT"] = "300"
-
+        # If device is not specified, determine it
         if device is None:
             device = "cuda" if torch.cuda.is_available() else "cpu"
-        print(f"Using device: {device}")
         
+        print(f"Using device: {device}")
         self.device = device
         self.model = model.to(self.device)
         self.tokenizer = tokenizer
         self.config = config
         
-        # --- 2. Optimizer & Scheduler ---
-        # FIX: Pass the specific sub-dictionaries, not the whole config
-        self.optimizer = create_optimizer(self.model, self.config['optimizer'])
-        self.scheduler = create_scheduler(self.optimizer, self.config['scheduler'])
-        
+        # Initialize optimizer and scheduler
+        self.optimizer = None  # Should be set by child class
+        self.scheduler = None  # Will be set when training starts
         self.scaler = torch.amp.GradScaler(device=self.device)
-        
-        # --- 3. Experiment Management ---
         self.use_wandb = config['training'].get('use_wandb', False)
-        
+        # Initialize experiment directories
         self.expt_root, self.checkpoint_dir, self.attn_dir, self.text_dir, \
         self.best_model_path, self.last_model_path = self._init_experiment(run_name, config_file)
 
-        # --- 4. Training State ---
+        # Training state
         self.current_epoch = 0
         self.best_metric = float('inf')
         self.training_history = []
-    
-    # =========================================================================
-    # Abstract Methods (Must be implemented by child classes)
-    # =========================================================================
     
     @abstractmethod
     def _train_epoch(self, dataloader) -> Tuple[Dict[str, float], Dict[str, torch.Tensor]]:
@@ -82,16 +124,55 @@ class BaseTrainer(ABC):
         """Evaluation loop."""
         pass
 
-    # =========================================================================
-    # Experiment Initialization & Setup
-    # =========================================================================
 
     def _init_experiment(self, run_name: str, config_file: str):
         """Initialize experiment directories and save initial files."""
-        # Create directory structure
+        # Create experiment directory
         expt_root = Path(os.getcwd()) / 'expts' / run_name
         expt_root.mkdir(parents=True, exist_ok=True)
 
+        # Copy config
+        shutil.copy2(config_file, expt_root / "config.yaml")
+
+        # Save model architecture with torchinfo summary
+        with open(expt_root / "model_arch.txt", "w") as f:
+            # Get a sample input shape from your model's expected input
+            if isinstance(self.model, DecoderOnlyTransformer):
+                batch_size = self.config['data'].get('batch_size', 8)
+                max_len    = self.model.max_len
+                input_size = [(batch_size, max_len), (batch_size,)]
+                dtypes     = [torch.long, torch.long]
+                # Generate the summary
+                model_summary = summary(
+                    self.model,
+                    input_size=input_size,  # Adjust these dimensions based on your model's input
+                    dtypes=dtypes
+                )
+                # Write the summary string to file
+                f.write(str(model_summary))
+            elif isinstance(self.model, EncoderDecoderTransformer):
+                batch_size = self.config['data'].get('batch_size', 8)
+                max_len = 1000
+                num_feats = self.config['data']['num_feats']
+                input_data = [
+                    torch.randn(batch_size, max_len, num_feats).to(self.device), 
+                    torch.randint(0, self.model.num_classes, (batch_size, max_len//10)).to(self.device), 
+                    torch.randint(max_len//2, max_len, (batch_size,)).to(self.device), 
+                    torch.randint(max_len//20, max_len//10, (batch_size,)).to(self.device)
+                ]
+                dtypes = [torch.float32, torch.long, torch.long, torch.long]
+                # Generate the summary
+                model_summary = summary(
+                    self.model,
+                    input_data=input_data,  # Adjust these dimensions based on your model's input
+                    dtypes=dtypes
+                )
+                # Write the summary string to file
+                f.write(str(model_summary))
+            else:
+                raise NotImplementedError("Model architecture summary not implemented")
+
+        # Create subdirectories
         checkpoint_dir = expt_root / 'checkpoints'
         attn_dir = expt_root / 'attn'
         text_dir = expt_root / 'text'
@@ -100,102 +181,39 @@ class BaseTrainer(ABC):
         attn_dir.mkdir(exist_ok=True)
         text_dir.mkdir(exist_ok=True)
 
+        # Define checkpoint paths
         best_model_path = checkpoint_dir / 'checkpoint-best-metric-model.pth'
         last_model_path = checkpoint_dir / 'checkpoint-last-epoch-model.pth'
 
-        # Save config file copy
-        shutil.copy2(config_file, expt_root / "config.yaml")
-
-        # Save Model Summary (Robust implementation)
-        try:
-            with open(expt_root / "model_arch.txt", "w") as f:
-                model_type = type(self.model).__name__
-                
-                if "DecoderOnly" in model_type:
-                    self._write_decoder_summary(f)
-                elif "EncoderDecoder" in model_type:
-                    self._write_encoder_decoder_summary(f)
-                else:
-                    # Fallback for unknown model types
-                    f.write(str(self.model))
-                    print(f"Warning: Auto-summary skipped for {model_type}. Wrote string repr.")
-        except Exception as e:
-            print(f"Warning: Could not generate model summary: {e}")
-
-        # Initialize WandB if enabled
+        # Wandb initialization
         if self.use_wandb:
-            self._init_wandb(run_name)
+            """Initialize Weights & Biases logging."""
+            run_id = self.config['training'].get('wandb_run_id', None)
+            if run_id and run_id.lower() != "none":
+                self.wandb_run = wandb.init(
+                    project=self.config['training'].get('wandb_project', 'default-project'),
+                    id=run_id,
+                    resume="must",
+                    config=self.config
+                )
+            else:
+                self.wandb_run = wandb.init(
+                    project=self.config['training'].get('wandb_project', 'default-project'),
+                    config=self.config,
+                    name=run_name
+                )
 
         return expt_root, checkpoint_dir, attn_dir, text_dir, best_model_path, last_model_path
 
-    def _write_decoder_summary(self, file_handle):
-        """Helper to write summary for DecoderOnlyTransformer."""
-        batch_size = self.config['data'].get('batch_size', 8)
-        max_len    = getattr(self.model, 'max_len', 512)
-        input_size = [(batch_size, max_len), (batch_size,)]
-        dtypes     = [torch.long, torch.long]
-        
-        model_summary = summary(
-            self.model,
-            input_size=input_size,
-            dtypes=dtypes,
-            verbose=0
-        )
-        file_handle.write(str(model_summary))
-
-    def _write_encoder_decoder_summary(self, file_handle):
-        """Helper to write summary for EncoderDecoderTransformer."""
-        batch_size = self.config['data'].get('batch_size', 8)
-        max_len = 100
-        num_feats = self.config['data']['num_feats']
-        
-        # Create dummy inputs
-        dummy_feats = torch.randn(batch_size, max_len, num_feats).to(self.device)
-        dummy_targets = torch.randint(0, getattr(self.model, 'num_classes', 100), (batch_size, max_len)).to(self.device)
-        dummy_src_lens = torch.full((batch_size,), max_len, dtype=torch.long).to(self.device)
-        dummy_tgt_lens = torch.full((batch_size,), max_len, dtype=torch.long).to(self.device)
-
-        input_data = [dummy_feats, dummy_targets, dummy_src_lens, dummy_tgt_lens]
-        
-        model_summary = summary(
-            self.model,
-            input_data=input_data,
-            verbose=0
-        )
-        file_handle.write(str(model_summary))
-
-    def _init_wandb(self, run_name):
-        """Helper to initialize WandB run."""
-        run_id = self.config['training'].get('wandb_run_id', None)
-        
-        if run_id and run_id.lower() != "none":
-            self.wandb_run = wandb.init(
-                project=self.config['training'].get('wandb_project', 'default-project'),
-                id=run_id,
-                resume="must",
-                config=self.config
-            )
-        else:
-            self.wandb_run = wandb.init(
-                project=self.config['training'].get('wandb_project', 'default-project'),
-                config=self.config,
-                name=run_name
-            )
-
-    # =========================================================================
-    # Logging & Visualization
-    # =========================================================================
-
     def _log_metrics(self, metrics: Dict[str, Dict[str, float]], step: int):
         """Generic metric logging method."""
-        # Update history
         self.training_history.append({
             'epoch': step,
             **metrics,
             'lr': self.optimizer.param_groups[0]['lr']
         })
         
-        # Log to WandB
+        # Log to wandb
         if self.use_wandb:
             wandb_metrics = {}
             for split, split_metrics in metrics.items():
@@ -204,18 +222,17 @@ class BaseTrainer(ABC):
             wandb_metrics['learning_rate'] = self.optimizer.param_groups[0]['lr']
             wandb.log(wandb_metrics, step=step)
         
-        # Print to Console
-        self._print_metrics_tree(metrics, step)
-
-    def _print_metrics_tree(self, metrics, step):
-        """Helper to pretty-print metrics."""
+        # Print metrics with tree structure
         print(f"\n📊 Metrics (Epoch {step}):")
+        
+        # Print metrics by split
         splits = sorted(metrics.keys())
         for i, split in enumerate(splits):
             is_last_split = i == len(splits) - 1
             split_prefix = "└──" if is_last_split else "├──"
             print(f"{split_prefix} {split.upper()}:")
             
+            # Print metrics within split
             split_metrics = sorted(metrics[split].items())
             for j, (metric_name, value) in enumerate(split_metrics):
                 is_last_metric = j == len(split_metrics) - 1
@@ -226,8 +243,10 @@ class BaseTrainer(ABC):
                     metric_prefix = "│   └──" if is_last_metric else "│   ├──"
                 print(f"{metric_prefix} {metric_name}: {value:.4f}")
         
+        # Print learning rate
         print("└── TRAINING:")
         print(f"    └── learning_rate: {self.optimizer.param_groups[0]['lr']:.6f}")
+
 
     def _save_attention_plot(self, attn_weights: torch.Tensor, epoch: int, attn_type: str = "self"):
         """Save attention weights visualization."""
@@ -247,6 +266,7 @@ class BaseTrainer(ABC):
         if self.use_wandb:
             wandb.log({f"{attn_type}_attention": wandb.Image(plot_path)}, step=epoch)
 
+
     def _save_generated_text(self, text: dict, suffix: str):
         """Save generated text to JSON file."""
         text_path = os.path.join(self.text_dir, f"text_{suffix}.json")
@@ -256,9 +276,6 @@ class BaseTrainer(ABC):
         if self.use_wandb:
             wandb.save(text_path)
 
-    # =========================================================================
-    # Checkpointing
-    # =========================================================================
 
     def save_checkpoint(self, filename: str):
         """Save a checkpoint of the model and training state."""
@@ -277,38 +294,43 @@ class BaseTrainer(ABC):
         if self.use_wandb:
             wandb.save(str(checkpoint_path))
 
+
     def load_checkpoint(self, filename: str):
-        """Load a checkpoint safely."""
+        """
+        Load a checkpoint.
+        
+        Attempts to load each component of the checkpoint separately,
+        continuing even if some components fail to load.
+        """
         checkpoint_path = self.checkpoint_dir / filename
         if not checkpoint_path.exists():
             raise FileNotFoundError(f"No checkpoint found at {checkpoint_path}")
         
         try:
-            # Try safe load first
             checkpoint = torch.load(checkpoint_path, map_location=self.device, weights_only=True)
         except Exception as e:
-            print(f"Standard load failed, trying without weights_only restriction: {e}")
-            # Fallback for complex objects
-            checkpoint = torch.load(checkpoint_path, map_location=self.device, weights_only=False)
+            raise RuntimeError(f"Failed to load checkpoint file: {e}")
 
-        # Track loading status
+        # Dictionary to track loading status of each component
         load_status = {}
-        components_to_load = {
-            'model': (self.model, 'model_state_dict'),
-            'optimizer': (self.optimizer, 'optimizer_state_dict'),
-            'scaler': (self.scaler, 'scaler_state_dict')
-        }
 
-        # Load standard state dicts
-        for name, (obj, key) in components_to_load.items():
-            try:
-                obj.load_state_dict(checkpoint[key])
-                load_status[name] = True
-            except Exception as e:
-                print(f"Warning: Failed to load {name} state: {e}")
-                load_status[name] = False
+        # Try loading model state
+        try:
+            self.model.load_state_dict(checkpoint['model_state_dict'])
+            load_status['model'] = True
+        except Exception as e:
+            print(f"Warning: Failed to load model state: {e}")
+            load_status['model'] = False
 
-        # Load scheduler explicitly (it's optional)
+        # Try loading optimizer state
+        try:
+            self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+            load_status['optimizer'] = True
+        except Exception as e:
+            print(f"Warning: Failed to load optimizer state: {e}")
+            load_status['optimizer'] = False
+
+        # Try loading scheduler state if it exists
         if checkpoint.get('scheduler_state_dict') and self.scheduler:
             try:
                 self.scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
@@ -317,7 +339,15 @@ class BaseTrainer(ABC):
                 print(f"Warning: Failed to load scheduler state: {e}")
                 load_status['scheduler'] = False
 
-        # Load training scalars
+        # Try loading scaler state
+        try:
+            self.scaler.load_state_dict(checkpoint['scaler_state_dict'])
+            load_status['scaler'] = True
+        except Exception as e:
+            print(f"Warning: Failed to load scaler state: {e}")
+            load_status['scaler'] = False
+
+        # Try loading training state
         try:
             self.current_epoch = checkpoint['epoch']
             self.best_metric = checkpoint['best_metric']
@@ -327,7 +357,7 @@ class BaseTrainer(ABC):
             print(f"Warning: Failed to load training state: {e}")
             load_status['training_state'] = False
 
-        # Report results
+        # Summarize what was loaded successfully
         successful_loads = [k for k, v in load_status.items() if v]
         failed_loads = [k for k, v in load_status.items() if not v]
         
@@ -338,6 +368,7 @@ class BaseTrainer(ABC):
         print(f"Successfully loaded: {', '.join(successful_loads)}")
         if failed_loads:
             print(f"Failed to load: {', '.join(failed_loads)}")
+
 
     def cleanup(self):
         """Cleanup resources."""
