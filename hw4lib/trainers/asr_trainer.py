@@ -1,3 +1,4 @@
+%%writefile hw4lib/trainers/asr_trainer.py
 from .base_trainer import BaseTrainer
 from typing import Dict, Any, Optional, List, Tuple, Union
 import torch
@@ -346,30 +347,10 @@ class ASRTrainer(BaseTrainer):
                 if targets_golden is not None:
                     targets_golden = targets_golden.to(self.device)
 
-                # Encode speech features
-                # encoder_output: (Batch, Src_Len, D_Model)
                 encoder_output, pad_mask_src, _, _ = self.model.encode(feats, feat_lengths)
 
-                # --- FIX: Expand Encoder Outputs for Beam Search ---
-                beam_width = recognition_config.get('beam_width', 1)
-                
-                # We need separate variables for the expanded versions so we don't break the loop
-                current_encoder_output = encoder_output
-                current_pad_mask_src = pad_mask_src
-
-                if beam_width > 1:
-                    # Tile encoder output: (B, L, D) -> (B, 1, L, D) -> (B, K, L, D) -> (B*K, L, D)
-                    B, L, D = encoder_output.size()
-                    current_encoder_output = encoder_output.unsqueeze(1).repeat(1, beam_width, 1, 1).view(B * beam_width, L, D)
-                    
-                    # Tile padding mask: (B, L) -> (B, 1, L) -> (B, K, L) -> (B*K, L)
-                    current_pad_mask_src = pad_mask_src.unsqueeze(1).repeat(1, beam_width, 1).view(B * beam_width, L)
-
                 def get_score(x):
-                    # x is (Batch * Beam, Seq_Len)
-                    # We use the expanded encoder outputs
-                    asr_logits = self.model.score(x, current_encoder_output, current_pad_mask_src)
-                    
+                    asr_logits = self.model.score(x, encoder_output, pad_mask_src)
                     if recognition_config.get('lm_model') is not None:
                         lm_logits = recognition_config['lm_model'].score(x)
                         return asr_logits + recognition_config['lm_weight'] * lm_logits
@@ -385,14 +366,13 @@ class ASRTrainer(BaseTrainer):
                     device=self.device
                 )
 
-                if beam_width > 1 and hasattr(generator, "generate_beam"):
+                if recognition_config['beam_width'] > 1 and hasattr(generator, "generate_beam"):
                     seqs, scores = generator.generate_beam(
                         prompts,
-                        beam_width=beam_width,
+                        beam_width=recognition_config.get('beam_width', 1),
                         temperature=recognition_config.get('temperature', 1.0),
                         repeat_penalty=recognition_config.get('repeat_penalty', 1.0),
                     )
-                    # Pick best beam (index 0)
                     seqs = seqs[:, 0, :]
                     scores = scores[:, 0]
                 else:
@@ -403,8 +383,6 @@ class ASRTrainer(BaseTrainer):
                     )
 
                 del feats, feat_lengths, encoder_output, pad_mask_src, prompts
-                if beam_width > 1:
-                    del current_encoder_output, current_pad_mask_src
                 torch.cuda.empty_cache()
 
                 post_processed_preds = generator.post_process_sequence(seqs, self.tokenizer)
