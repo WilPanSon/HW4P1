@@ -29,10 +29,8 @@ class BaseTrainer(ABC):
             device: Optional[str] = None
     ):
         # --- 1. Setup & Config ---
-        # Fix WandB Timeout to prevent CommErrors
         os.environ["WANDB_INIT_TIMEOUT"] = "300"
 
-        # Determine device
         if device is None:
             device = "cuda" if torch.cuda.is_available() else "cpu"
         print(f"Using device: {device}")
@@ -43,15 +41,15 @@ class BaseTrainer(ABC):
         self.config = config
         
         # --- 2. Optimizer & Scheduler ---
-        # Initialize optimizer and scheduler immediately to prevent downstream errors
-        self.optimizer = create_optimizer(self.model, self.config)
-        self.scheduler = create_scheduler(self.optimizer, self.config)
+        # FIX: Pass the specific sub-dictionaries, not the whole config
+        self.optimizer = create_optimizer(self.model, self.config['optimizer'])
+        self.scheduler = create_scheduler(self.optimizer, self.config['scheduler'])
+        
         self.scaler = torch.amp.GradScaler(device=self.device)
         
         # --- 3. Experiment Management ---
         self.use_wandb = config['training'].get('use_wandb', False)
         
-        # Initialize experiment directories and save metadata
         self.expt_root, self.checkpoint_dir, self.attn_dir, self.text_dir, \
         self.best_model_path, self.last_model_path = self._init_experiment(run_name, config_file)
 
