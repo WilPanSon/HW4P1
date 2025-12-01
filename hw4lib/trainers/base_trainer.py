@@ -28,7 +28,6 @@ class BaseTrainer(ABC):
             config_file: str,
             device: Optional[str] = None
     ):
-        # 1. Fix WandB Timeout
         os.environ["WANDB_INIT_TIMEOUT"] = "300"
 
         if device is None:
@@ -40,14 +39,12 @@ class BaseTrainer(ABC):
         self.tokenizer = tokenizer
         self.config = config
         
-        # 2. Initialize optimizer and scheduler immediately
-        self.optimizer = create_optimizer(self.model, self.config)
+        self.optimizer = create_optimizer(self.model, self.config['optimizer'])
         self.scheduler = create_scheduler(self.optimizer, self.config)
 
         self.scaler = torch.amp.GradScaler(device=self.device)
         self.use_wandb = config['training'].get('use_wandb', False)
         
-        # Initialize experiment directories
         self.expt_root, self.checkpoint_dir, self.attn_dir, self.text_dir, \
         self.best_model_path, self.last_model_path = self._init_experiment(run_name, config_file)
 
