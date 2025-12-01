@@ -6,7 +6,7 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 import torch.nn as nn
 from hw4lib.data.tokenizer import H4Tokenizer
-from hw4lib.utils import create_optimizer, create_scheduler
+from hw4lib.utils import create_optimizer
 from hw4lib.model import DecoderOnlyTransformer, EncoderDecoderTransformer
 import os
 import shutil
@@ -16,9 +16,6 @@ from torchinfo import summary
 
 
 class BaseTrainer(ABC):
-    """
-    Base Trainer class that provides common functionality for all trainers.
-    """
     def __init__(
             self,
             model: nn.Module,
@@ -40,8 +37,7 @@ class BaseTrainer(ABC):
         self.config = config
         
         self.optimizer = create_optimizer(self.model, self.config['optimizer'])
-        self.scheduler = create_scheduler(self.optimizer, self.config)
-
+        self.scheduler = None 
         self.scaler = torch.amp.GradScaler(device=self.device)
         self.use_wandb = config['training'].get('use_wandb', False)
         
@@ -70,14 +66,15 @@ class BaseTrainer(ABC):
 
 
     def _init_experiment(self, run_name: str, config_file: str):
-        """Initialize experiment directories and save initial files."""
         expt_root = Path(os.getcwd()) / 'expts' / run_name
         expt_root.mkdir(parents=True, exist_ok=True)
 
         shutil.copy2(config_file, expt_root / "config.yaml")
+
         try:
             with open(expt_root / "model_arch.txt", "w") as f:
                 model_type = type(self.model).__name__
+                
                 if "DecoderOnly" in model_type:
                     batch_size = self.config['data'].get('batch_size', 8)
                     max_len    = getattr(self.model, 'max_len', 512)
@@ -112,7 +109,7 @@ class BaseTrainer(ABC):
                     f.write(str(model_summary))
                 else:
                     f.write(str(self.model))
-                    print(f"Warning: Auto-summary skipped for {model_type}. Wrote text representation.")
+                    print(f"Warning: Auto-summary skipped for {model_type}. Wrote string repr.")
 
         except Exception as e:
             print(f"Warning: Could not generate model summary: {e}")
@@ -234,7 +231,7 @@ class BaseTrainer(ABC):
         try:
             checkpoint = torch.load(checkpoint_path, map_location=self.device, weights_only=True)
         except Exception as e:
-            print(f"Standard load failed, trying without weights_only: {e}")
+            print(f"Standard load failed, trying without weights_only restriction: {e}")
             checkpoint = torch.load(checkpoint_path, map_location=self.device, weights_only=False)
 
         load_status = {}
