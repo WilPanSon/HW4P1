@@ -169,8 +169,8 @@ class BaseTrainer(ABC):
                 )
                 # Write the summary string to file
                 f.write(str(model_summary))
-            else:
-                raise NotImplementedError("Model architecture summary not implemented")
+            # else:
+            #     raise NotImplementedError("Model architecture summary not implemented")
 
         # Create subdirectories
         checkpoint_dir = expt_root / 'checkpoints'
