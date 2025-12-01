@@ -116,26 +116,19 @@ class SequenceGenerator:
             if finished_mask.all():
                 break
 
-            # 1. Get Model Output
             logits = self.score_fn(current_seqs)
-            
-            # 2. Apply Penalties & Temperature
+
             logits = self._apply_repeat_penalty(logits, current_seqs, repeat_penalty)
             if temperature != 1.0:
                 logits = logits / temperature
 
-            # 3. Select Best Token
             log_probs = F.log_softmax(logits, dim=-1)
             next_token_log_probs, next_tokens = torch.max(log_probs, dim=-1)
 
-            # 4. Update Sequences & Scores
-            # Only update scores for unfinished sequences
             log_scores = log_scores + (next_token_log_probs * (~finished_mask).float())
             
-            # Append new token
             current_seqs = torch.cat([current_seqs, next_tokens.unsqueeze(1)], dim=1)
 
-            # 5. Update Finished Status
             just_finished = (next_tokens == self.tokenizer.eos_id)
             finished_mask = finished_mask | just_finished
 
@@ -158,8 +151,7 @@ class SequenceGenerator:
         x = x.to(self.device)
         batch_size, seq_len = x.shape
         
-        # --- Initialization Step ---
-        # Get initial logits
+
         logits = self.score_fn(x)
         logits = self._apply_repeat_penalty(logits, x, repeat_penalty)
         if temperature != 1.0:
@@ -201,62 +193,40 @@ class SequenceGenerator:
             logits = self._apply_repeat_penalty(logits, beam_seqs, repeat_penalty)
             if temperature != 1.0:
                 logits = logits / temperature
-            
-            # 4. Calculate Next Token Log Probs
+
             next_log_probs = F.log_softmax(logits, dim=-1)
-            
-            # 5. Mask Finished Beams
-            # If a beam is finished, we shouldn't expand it. We force it to predict EOS with score 0 
-            # (relative change) so its accumulated score stays constant, or mask entirely.
-            # A simpler approach for fixed-length generation is to set log-probs to -inf except EOS.
+
             if beam_finished.any():
                 # Expand mask to (Batch, Beam, Vocab)
                 mask_expanded = beam_finished.unsqueeze(-1).expand_as(next_log_probs)
                 next_log_probs[mask_expanded] = float('-inf')
-                # Force EOS prediction for finished beams (score 0 change)
-                # Note: effectively keeps score same, just extends sequence with pads/eos
-                # Just masking all is usually safer for sorting logic
-            
-            # 6. Compute Cumulative Scores
-            # (Batch, Beam, 1) + (Batch, Beam, Vocab) -> (Batch, Beam, Vocab)
+
             candidate_scores = beam_scores.unsqueeze(-1) + next_log_probs
-            
-            # 7. Select Top-K best beams across all candidates (Beam * Vocab)
-            # Flatten candidates to (Batch, Beam * Vocab)
+
             flat_candidate_scores = candidate_scores.view(batch_size, -1)
             
             topk_scores, topk_indices = torch.topk(flat_candidate_scores, beam_width, dim=-1)
-            
-            # 8. Recover Beam Index and Token Index
-            # Which previous beam did this come from?
+
             prev_beam_indices = topk_indices // vocab_size
             # What was the new token?
             new_token_indices = topk_indices % vocab_size
             
-            # 9. Construct New Beams
-            # Gather sequences from previous step
-            # shape: (Batch, Beam, Length)
             new_beam_seqs = torch.zeros(batch_size, beam_width, beam_seqs.size(-1) + 1, dtype=torch.long, device=self.device)
             
             for b in range(batch_size):
-                # Select the beam sources for this batch
                 selected_beams = beam_seqs[b, prev_beam_indices[b]] 
-                # Append new tokens
                 new_tokens = new_token_indices[b].unsqueeze(-1)
                 new_beam_seqs[b] = torch.cat([selected_beams, new_tokens], dim=-1)
             
             beam_seqs = new_beam_seqs
             beam_scores = topk_scores
             
-            # 10. Update Finished Status
-            # A beam is finished if its parent was finished OR the new token is EOS
-            # Re-gather previous finished status
+
             prev_finished = beam_finished.gather(1, prev_beam_indices)
             new_finished = (new_token_indices == self.tokenizer.eos_id)
             beam_finished = prev_finished | new_finished
 
-        # --- Length Normalization & Final Sort ---
-        # Simple length penalty
+
         seq_lengths = (beam_seqs != self.tokenizer.pad_id).sum(dim=-1).float()
         # Google NMT length penalty formula
         alpha = 0.6 
