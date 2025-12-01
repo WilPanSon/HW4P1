@@ -1,4 +1,3 @@
-%%writefile hw4lib/trainers/asr_trainer.py
 from .base_trainer import BaseTrainer
 from typing import Dict, Any, Optional, List, Tuple, Union
 import torch
