@@ -33,7 +33,7 @@ class LMDataset(Dataset):
         self.sos_token = tokenizer.sos_id
         self.pad_token = tokenizer.pad_id
 
-        self.text_dir = os.path.join(config['root'], partition, 'fbank')
+        self.text_dir = os.path.join(config['root'], partition)
 
         self.text_files = sorted([f for f in os.listdir(self.text_dir) if f.endswith('.npy')])
 
