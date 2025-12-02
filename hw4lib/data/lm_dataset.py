@@ -1,164 +1,292 @@
-from typing import Tuple, List
-import os
-import numpy as np
-from tqdm import tqdm
+from .base_trainer import BaseTrainer
 import torch
-from torch.utils.data import Dataset 
-from torch.nn.utils.rnn import pad_sequence
-from .tokenizer import H4Tokenizer
+import torch.nn as nn
+from tqdm import tqdm
+from typing import Dict, Tuple, Any, Optional, List
+from ..utils import create_scheduler
+from ..decoding.sequence_generator import SequenceGenerator
 
-class LMDataset(Dataset):
-    """
-    Dataset for Language Model training/evaluation.
-    """
-    def __init__(
-            self, 
-            partition: str, 
-            config: dict, 
-            tokenizer: H4Tokenizer
-    ):
-        """
-        Initializes the Language Model Dataset for training language models on text data.
-
-        Args:
-            partition (str): Data partition subdirectory under root (e.g., 'train', 'test')
-            config (dict): Configuration dictionary containing dataset settings
-            tokenizer (H4Tokenizer): Tokenizer for encoding/decoding text
-        """
-        self.config    = config
-        self.partition = partition
-        self.tokenizer = tokenizer
-
-        self.eos_token = tokenizer.eos_id
-        self.sos_token = tokenizer.sos_id
-        self.pad_token = tokenizer.pad_id
-
-        self.text_dir = os.path.join(config['root'], partition)
-
-        self.text_files = sorted([f for f in os.listdir(self.text_dir) if f.endswith('.npy')])
-
-        subset_size = config.get('subset_size', len(self.text_files))
-        self.text_files = self.text_files[:subset_size]
-
-        self.transcripts_shifted = []
-        self.transcripts_golden  = []
+class LMTrainer(BaseTrainer):
+    def __init__(self, model, tokenizer, config, run_name, config_file, device=None):
+        super().__init__(model, tokenizer, config, run_name, config_file, device)
         
-        self.total_chars  = 0
-        self.total_tokens = 0
-        self.text_max_len = 0
-        
-        print(f"Loading transcripts for {partition} partition...")
-        for file in tqdm(self.text_files):
-            file_path = os.path.join(self.text_dir, file)
-         
-            transcript_arr = np.load(file_path, allow_pickle=True)
-            transcript = "".join(transcript_arr.tolist())
-  
-            self.total_chars += len(transcript)
+        self.criterion = nn.CrossEntropyLoss(
+            ignore_index=self.tokenizer.pad_id, 
+            label_smoothing=self.config['training'].get('label_smoothing', 0.0)
+        )
+
+    def _train_epoch(self, dataloader) -> Tuple[Dict[str, float], Dict[str, torch.Tensor]]:
+        self.model.train()
+        batch_bar = tqdm(total=len(dataloader), dynamic_ncols=True, leave=False, position=0, desc=f"[Training LM]")
+        running_ce_loss = 0.0
+        total_tokens = 0
+
+        self.optimizer.zero_grad()
+
+        for i, batch in enumerate(dataloader):
+            targets_shifted, targets_golden, lengths = batch
             
-            tokenized = tokenizer.encode(transcript)
+            targets_shifted = targets_shifted.to(self.device)
+            targets_golden = targets_golden.to(self.device)
+            lengths = lengths.to(self.device)
 
-            self.total_tokens += len(tokenized)
-
-            self.text_max_len = max(self.text_max_len, len(tokenized)+1)
-            
-            self.transcripts_shifted.append([self.sos_token] + tokenized)
-            self.transcripts_golden.append(tokenized + [self.eos_token])
-
-        self.avg_chars_per_token = self.total_chars / self.total_tokens if self.total_tokens > 0 else 0
-        
-
-        if not (len(self.transcripts_shifted) == len(self.transcripts_golden)):
-            raise ValueError("Shifted and golden transcripts are misaligned")
-        
-        # Store the length of the dataset
-        self.length = len(self.transcripts_shifted)
-        
-    def get_avg_chars_per_token(self) -> float:
-        '''
-        Get the average number of characters per token. Used to calculate character-level perplexity.
-        DO NOT MODIFY
-        '''
-        return self.avg_chars_per_token
-    
-    def __len__(self) -> int:
-        """Returns the number of samples in the dataset."""
-        return self.length
-
-    def __getitem__(self, idx: int) -> Tuple[torch.LongTensor, torch.LongTensor]:
-        """
-        Get a single sample from the dataset.
-
-        Args:
-            idx (int): Sample index
-
-        Returns:
-            tuple: (shifted_transcript, golden_transcript) where:
-                - shifted_transcript: LongTensor starting with SOS token
-                - golden_transcript: LongTensor ending with EOS token
-        """
-        shifted = torch.LongTensor(self.transcripts_shifted[idx])
-        golden  = torch.LongTensor(self.transcripts_golden[idx])
-        return shifted, golden
-    
-    
-    def collate_fn(self, batch: List[Tuple[torch.LongTensor, torch.LongTensor]]) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """
-        Collate and pad a batch of samples to create a batch of fixed-length padded shifted and golden transcripts.
-
-        Args:
-            batch (list): List of (shifted, golden) transcript pairs
-
-        Returns:
-            tuple: (padded_shifted, padded_golden, lengths) where:
-                - padded_shifted: Tensor of shape (batch, max_len) with SOS prefixes
-                - padded_golden: Tensor of shape (batch, max_len) with EOS suffixes
-                - lengths: Original sequence lengths before padding
-        """
-        shifted_transcripts, golden_transcripts = zip(*batch)
-
-        lengths = torch.tensor([len(seq) for seq in shifted_transcripts])
-
-
-        padded_shifted = pad_sequence(shifted_transcripts, batch_first=True, padding_value=self.pad_token)
-        padded_golden  = pad_sequence(golden_transcripts, batch_first=True, padding_value=self.pad_token)
-
-        return padded_shifted, padded_golden, lengths
-
-    def sample_prompts(self, num_samples: int, prompt_length: int, seed: int = None) -> Tuple[torch.LongTensor, List[torch.LongTensor]]:
-        """
-        Sample random prompts of fixed length from the dataset and return their original sequences.
-        DO NOT MODIFY
-        """
-        # Set random seed if provided
-        if seed is not None:
-            np_state = np.random.get_state()
-            np.random.seed(seed)
-            
-        prompts = []
-        originals = []
-        attempts = 0
-        max_attempts = num_samples * 10 
-        
-        while len(prompts) < num_samples and attempts < max_attempts:
-            idx = np.random.randint(0, len(self))
-            tokens = self.transcripts_shifted[idx][1:] # remove sos token
-            
-            if len(tokens) < prompt_length:
-                attempts += 1
-                continue
+            with torch.autocast(device_type=self.device, dtype=torch.float16):
+                raw_preds, attn_weights = self.model(targets_shifted, lengths)
+                raw_loss = self.criterion(
+                    raw_preds.view(-1, raw_preds.size(-1)), 
+                    targets_golden.view(-1)
+                )
                 
-            prompt_tokens = tokens[:prompt_length]
+            batch_tokens = lengths.sum().item()
+            total_tokens += batch_tokens
+            running_ce_loss += raw_loss.item() * batch_tokens
+
+            loss = raw_loss / self.config['training']['gradient_accumulation_steps']
             
-            prompts.append(torch.LongTensor([self.sos_token] + prompt_tokens))
-            originals.append(torch.LongTensor(tokens + [self.eos_token]))
-            
-            attempts += 1
-            
-        if len(prompts) < num_samples:
-            print(f"Warning: Could only sample {len(prompts)} valid prompts")
+            self.scaler.scale(loss).backward()
         
-        if seed is not None:
-            np.random.set_state(np_state)
+            if (i + 1) % self.config['training']['gradient_accumulation_steps'] == 0:
+                self.scaler.step(self.optimizer)
+                if not isinstance(self.scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
+                    self.scheduler.step()
+                self.scaler.update()
+                self.optimizer.zero_grad()
+
+            avg_ce_loss = running_ce_loss / total_tokens if total_tokens > 0 else 0
+            perplexity_token = torch.exp(torch.tensor(avg_ce_loss))
+            batch_bar.set_postfix(
+                ce_loss=f"{avg_ce_loss:.4f}",
+                ppl=f"{perplexity_token:.4f}",
+            )
+            batch_bar.update()
+
+            del targets_shifted, targets_golden, lengths, raw_preds, loss
+
+        if (len(dataloader) % self.config['training']['gradient_accumulation_steps']) != 0:
+            self.scaler.step(self.optimizer)
+            if not isinstance(self.scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
+                self.scheduler.step()
+            self.scaler.update()
+            self.optimizer.zero_grad()
+
+        avg_ce_loss = running_ce_loss / total_tokens
+        avg_ce_loss_char = avg_ce_loss / dataloader.dataset.get_avg_chars_per_token()
+        avg_perplexity_token = torch.exp(torch.tensor(avg_ce_loss))
+        avg_perplexity_char = torch.exp(torch.tensor(avg_ce_loss_char))
+        batch_bar.close()
+
+        return {
+            'ce_loss_token': avg_ce_loss,
+            'ce_loss_char': avg_ce_loss_char,
+            'perplexity_token': avg_perplexity_token.item(),
+            'perplexity_char': avg_perplexity_char.item()
+        }, attn_weights
             
-        return torch.stack(prompts), originals
+            
+    def _validate_epoch(self, dataloader):
+        self.model.eval()
+        batch_bar = tqdm(total=len(dataloader), dynamic_ncols=True, leave=False, position=0, desc=f"[Validating LM]")
+        running_ce_loss = 0.0
+        total_tokens = 0
+        last_attn_weights = None
+
+        for i, batch in enumerate(dataloader):
+            targets_shifted, targets_golden, lengths = batch
+            
+            targets_shifted = targets_shifted.to(self.device)
+            targets_golden = targets_golden.to(self.device)
+            lengths = lengths.to(self.device)
+
+            with torch.inference_mode():
+                raw_preds, attn_weights = self.model(targets_shifted, lengths)
+                loss = self.criterion(
+                    raw_preds.view(-1, raw_preds.size(-1)), 
+                    targets_golden.view(-1)
+                )
+                last_attn_weights = attn_weights
+
+            batch_tokens = lengths.sum().item()
+            total_tokens += batch_tokens
+            running_ce_loss += loss.item() * batch_tokens
+
+            avg_ce_loss = running_ce_loss / total_tokens
+            perplexity_token = torch.exp(torch.tensor(avg_ce_loss))
+            batch_bar.set_postfix(
+                ce_loss=f"{avg_ce_loss:.4f}",
+                ppl=f"{perplexity_token:.4f}",
+            )
+            batch_bar.update()
+
+            del targets_shifted, targets_golden, lengths, raw_preds, loss
+
+        avg_ce_loss = running_ce_loss / total_tokens
+        avg_ce_loss_char = avg_ce_loss / dataloader.dataset.get_avg_chars_per_token()
+        avg_perplexity_token = torch.exp(torch.tensor(avg_ce_loss))
+        avg_perplexity_char = torch.exp(torch.tensor(avg_ce_loss_char))
+        batch_bar.close()
+
+        return {
+            'ce_loss_token': avg_ce_loss,
+            'ce_loss_char': avg_ce_loss_char,
+            'perplexity_token': avg_perplexity_token.item(),
+            'perplexity_char': avg_perplexity_char.item()
+        }, last_attn_weights
+
+    def evaluate(self, test_dataloader):
+        metrics, test_attn = self._validate_epoch(test_dataloader)
+
+        metrics_to_log = {
+            'test': metrics
+        }
+        self._log_metrics(metrics_to_log, self.current_epoch)  
+
+        test_attn_keys = list(test_attn.keys())
+        self._save_attention_plot(test_attn[test_attn_keys[0]][0], self.current_epoch, "test_self")
+
+        generation_results = {}
+        eval_configs = self._get_evaluation_generation_configs()
+        for config_name, config in eval_configs.items():
+            try:
+                gen_results = self.generate(test_dataloader, generation_config=config)
+                generation_results[config_name] = gen_results
+                self._save_generated_text(gen_results, f'test_epoch_{self.current_epoch}_{config_name}')
+            except Exception as e:
+                print(f"Could not generate results for {config_name}: {e}")
+                continue
+        return metrics, generation_results
+
+    def train(self, train_dataloader, val_dataloader, epochs: int):
+        if self.scheduler is None:
+            raise ValueError("Scheduler is not initialized, initialize it first!")
+        if self.optimizer is None:
+            raise ValueError("Optimizer is not initialized, initialize it first!")
+        
+        best_val_loss = float('inf')
+
+        for epoch in range(self.current_epoch, self.current_epoch + epochs):
+            train_metrics, train_attn = self._train_epoch(train_dataloader)
+            val_metrics, val_attn = self._validate_epoch(val_dataloader)
+
+            gen_results = self.generate(val_dataloader, generation_config=self._get_evaluation_generation_configs()['greedy'])
+            
+            if isinstance(self.scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
+                self.scheduler.step(val_metrics['ce_loss_token'])
+
+            metrics = {
+                'train': train_metrics,
+                'val': val_metrics
+            }
+            self._log_metrics(metrics, epoch)
+            
+            if train_attn:
+                k = list(train_attn.keys())[0]
+                self._save_attention_plot(train_attn[k][0], epoch, "train_self")
+            if val_attn:
+                k = list(val_attn.keys())[0]
+                self._save_attention_plot(val_attn[k][0], epoch, "val_self")
+
+            self._save_generated_text(gen_results, f'val_epoch_{epoch}')
+            self.save_checkpoint('checkpoint-last-epoch-model.pth')
+            
+            val_loss = val_metrics['ce_loss_token']
+            if val_loss < best_val_loss:
+                best_val_loss = val_loss
+                self.best_metric = val_loss
+                self.save_checkpoint('checkpoint-best-metric-model.pth')
+
+            self.current_epoch += 1
+
+    def generate(self, dataloader, generation_config: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
+        if generation_config is None:
+            generation_config = {
+                'num_samples': 10,
+                'prompt_length': 20,
+                'seed': 11785,
+                'max_length': self.model.max_len,
+                'temperature': 1.0,
+                'beam_width': 1,
+                'repeat_penalty': 1.0,
+                'top_k': 0,
+                'top_p': 0.0    
+            }
+
+        generator = SequenceGenerator(
+            score_fn=lambda x: self.model(x)[0][:, -1, :],
+            tokenizer=self.tokenizer,
+            max_length=self.model.max_len,
+            device=self.device
+        )
+
+        prompts, originals = dataloader.dataset.sample_prompts(
+            num_samples=generation_config.get('num_samples', 10),
+            prompt_length=generation_config.get('prompt_length', 10),
+            seed=generation_config.get('seed', 11785)
+        )
+        prompts = prompts.to(self.device)
+
+        self.model.eval()
+        with torch.inference_mode():
+            if generation_config.get('top_k', 0) > 0 or generation_config.get('top_p', 0) > 0:
+                raise NotImplementedError 
+            elif generation_config.get('beam_width', 1) > 1:
+                raise NotImplementedError 
+            else:
+                seqs, scores = generator.generate_greedy(
+                    prompts,
+                    temperature=generation_config.get('temperature', 1.0),
+                    repeat_penalty=generation_config.get('repeat_penalty', 1.0)
+                )
+
+        processed_seqs = generator.post_process_sequence(seqs, self.tokenizer)
+
+        results = []
+        for _, (prompt, seq, score, original) in enumerate(zip(prompts, processed_seqs, scores, originals)):
+            results.append({
+                'prompt': self.tokenizer.decode(prompt.tolist()),
+                'original': self.tokenizer.decode(original[len(prompt):].tolist()),
+                'generated': self.tokenizer.decode(seq[len(prompt):].tolist()),
+                'score': score.item()
+            })
+
+        return results
+
+    def _get_evaluation_generation_configs(self) -> Dict[str, Dict[str, Any]]:
+        common_config = {
+            'num_samples': 50,
+            'prompt_length': 10,
+            'seed': 11785,
+            'max_length': self.model.max_len,
+        }
+        
+        greedy_config = common_config.copy()
+        greedy_config.update({
+            'temperature': 1.0,
+            'beam_width': 1,
+            'repeat_penalty': 1.0,
+            'top_k': 0,
+            'top_p': 0.0
+        })
+        
+        beam_config = common_config.copy()
+        beam_config.update({
+            'temperature': 1.0,
+            'beam_width': 10,
+            'repeat_penalty': 1.2,
+            'top_k': 0,
+            'top_p': 0.0
+        })
+
+        sample_config = common_config.copy()
+        sample_config.update({
+            'temperature': 1.0,
+            'beam_width': 1,
+            'repeat_penalty': 1.0,
+            'top_k': 10,
+            'top_p': 0.95
+        })
+        
+        return {
+            'greedy': greedy_config,
+            'beam': beam_config,
+            'sample': sample_config
+        }
