@@ -530,8 +530,4 @@ class ProgressiveTrainer(ASRTrainer):
             collate_fn=dataset.collate_fn,
             pin_memory=True
         )
-<<<<<<< HEAD
         return subset_loader
-=======
-        return subset_loader
->>>>>>> parent of d023925 (Update asr_trainer.py)
