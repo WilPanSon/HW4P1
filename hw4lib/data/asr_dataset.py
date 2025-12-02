@@ -26,7 +26,15 @@ class ASRDataset(Dataset):
         self.sos_token = tokenizer.sos_id
         self.pad_token = tokenizer.pad_id
 
-        self.fbank_dir = os.path.join(config['root'], partition, 'fbank')
+        # Check for fbank subfolder, otherwise assume flat structure
+        possible_fbank = os.path.join(config['root'], partition, 'fbank')
+
+        if os.path.exists(possible_fbank) and len(os.listdir(possible_fbank)) > 0:
+            self.fbank_dir = possible_fbank
+        else:
+            self.fbank_dir = os.path.join(config['root'], partition)
+
+        print(f"[{partition}] looking for features in: {self.fbank_dir}")
         
         self.fbank_files = sorted([f for f in os.listdir(self.fbank_dir) if f.endswith('.npy')])
         
