@@ -187,6 +187,7 @@ class BaseTrainer(ABC):
 
         # Wandb initialization
         if self.use_wandb:
+            wandb.login(key="f5d84d5f4baabdaf504d4d33b4af18ee1ec85664")
             """Initialize Weights & Biases logging."""
             run_id = self.config['training'].get('wandb_run_id', None)
             if run_id and run_id.lower() != "none":
