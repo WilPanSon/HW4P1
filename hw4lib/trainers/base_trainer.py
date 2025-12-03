@@ -189,19 +189,19 @@ class BaseTrainer(ABC):
         if self.use_wandb:
             """Initialize Weights & Biases logging."""
             run_id = self.config['training'].get('wandb_run_id', None)
-            # if run_id and run_id.lower() != "none":
-            #     self.wandb_run = wandb.init(
-            #         project=self.config['training'].get('wandb_project', 'default-project'),
-            #         id=run_id,
-            #         resume="must",
-            #         config=self.config
-            #     )
-            # else:
-            #     self.wandb_run = wandb.init(
-            #         project=self.config['training'].get('wandb_project', 'default-project'),
-            #         config=self.config,
-            #         name=run_name
-            #     )
+            if run_id and run_id.lower() != "none":
+                self.wandb_run = wandb.init(
+                    project=self.config['training'].get('wandb_project', 'default-project'),
+                    id=run_id,
+                    resume="must",
+                    config=self.config
+                )
+            else:
+                self.wandb_run = wandb.init(
+                    project=self.config['training'].get('wandb_project', 'default-project'),
+                    config=self.config,
+                    name=run_name
+                )
         return expt_root, checkpoint_dir, attn_dir, text_dir, best_model_path, last_model_path
 
     def _log_metrics(self, metrics: Dict[str, Dict[str, float]], step: int):
