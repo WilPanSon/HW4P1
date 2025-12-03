@@ -192,7 +192,6 @@ class BaseTrainer(ABC):
             if run_id and run_id.lower() != "none":
                 self.wandb_run = wandb.init(
                     project=self.config['training'].get('wandb_project', 'default-project'),
-                    entity = "alexzhen-cmu",
                     id=run_id,
                     resume="must",
                     config=self.config
@@ -200,7 +199,6 @@ class BaseTrainer(ABC):
             else:
                 self.wandb_run = wandb.init(
                     project=self.config['training'].get('wandb_project', 'default-project'),
-                    entity = "alexzhen-cmu",
                     config=self.config,
                     name=run_name
                 )
