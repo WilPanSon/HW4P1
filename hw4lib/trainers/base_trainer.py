@@ -198,18 +198,11 @@ class BaseTrainer(ABC):
                     config=self.config
                 )
             else:
-                # self.wandb_run = wandb.init(
-                #     project=self.config['training'].get('wandb_project', 'default-project'),
-                #     entity = "alexzhen-cmu",
-                #     config=self.config,
-                #     name=run_name
-                # )
                 self.wandb_run = wandb.init(
-                    project=self.config['training']['wandb_project'],
-                    entity="alexzhen-cmu",
-                    name=config['Name'],
+                    project=self.config['training'].get('wandb_project', 'default-project'),
+                    entity = "alexzhen-cmu",
                     config=self.config,
-                    resume="allow"
+                    name=run_name
                 )
         return expt_root, checkpoint_dir, attn_dir, text_dir, best_model_path, last_model_path
 
