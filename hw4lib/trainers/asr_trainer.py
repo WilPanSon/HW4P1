@@ -13,6 +13,17 @@ import pandas as pd
 
 class ASRTrainer(BaseTrainer):
     def __init__(self, model, tokenizer, config, run_name, config_file, device=None):
+        if 'training' in config and 'wandb_entity' in config['training']:
+            print(f"⚠️ ASRTrainer: Removing hardcoded entity '{config['training']['wandb_entity']}' to prevent 403 Error.")
+            del config['training']['wandb_entity']
+
+        if 'training' in config and 'wandb_project' in config['training']:
+            proj_name = config['training']['wandb_project']
+            if '/' in proj_name:
+                clean_project = proj_name.split('/')[-1]
+                print(f"⚠️ ASRTrainer: Cleaning project name from '{proj_name}' to '{clean_project}'")
+                config['training']['wandb_project'] = clean_project
+                
         super().__init__(model, tokenizer, config, run_name, config_file, device)
 
         self.ce_criterion = nn.CrossEntropyLoss(
