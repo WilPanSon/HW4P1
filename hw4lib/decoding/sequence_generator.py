@@ -1,3 +1,8 @@
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from typing import Tuple, Optional, List, Callable
+from ..data import H4Tokenizer
 class SequenceGenerator:
     """
     A class for generating sequences using various decoding strategies.
